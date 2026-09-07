@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, Header
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import select, delete, func, or_, update
@@ -20,8 +20,9 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from ..auth import get_current_user
 from ..db import get_db, SessionLocal
-from ..models import User, PlaybackSession, QueueItem, ListenHistoryItem, Station, Playlist, PlaylistTrack, LikedTrack
-from ..api_schemas.player import PlayerPlayAlbumRequest, PlayerPlayPlaylistRequest, PlayerPlayTrackRequest, PlayerJumpRequest, PlayerQueueItem, PlayerStateResponse, PlayerQueueAppendTrackRequest, PlayerQueueAppendAlbumRequest, PlayerQueueReorderRequest, PlayerRemoveQueueItemResponse, PlayerHistoryItem, PlayerHistoryResponse, PlayerActionRequest, PlayerReplayRequest, AutoplaySetRequest
+from ..devices import touch_or_create_device
+from ..models import User, PlaybackSession, QueueItem, ListenHistoryItem, Station, Playlist, PlaylistTrack, LikedTrack, PlaybackDevice
+from ..api_schemas.player import PlayerPlayAlbumRequest, PlayerPlayPlaylistRequest, PlayerPlayTrackRequest, PlayerJumpRequest, PlayerQueueItem, PlayerStateResponse, PlayerQueueAppendTrackRequest, PlayerQueueAppendAlbumRequest, PlayerQueueReorderRequest, PlayerRemoveQueueItemResponse, PlayerHistoryItem, PlayerHistoryResponse, PlayerActionRequest, PlayerReplayRequest, AutoplaySetRequest, PlayerPositionRequest, PlayerSeekRequest, PlayerDevicesResponse, PlaybackDeviceResponse
 from ..settings_store import get_settings
 from ..user_settings_store import station_queue_ahead_for_user, queue_add_position_for_user, get_user_settings
 from ..integrations.subsonic import SubsonicClient
@@ -1120,6 +1121,100 @@ def _get_or_create_session(db: Session, user_id: str) -> PlaybackSession:
     return sess
 
 
+# --- Server-authoritative playback clock (mirrors the shared-lobby clock) ---
+
+POSITION_TRACKED_SESSION_ATTRS = ("position_ms", "position_updated_at", "position_item_id")
+
+
+def _epoch_ms(dt: Optional[datetime]) -> int:
+    if dt is None:
+        return 0
+    try:
+        return int(dt.timestamp() * 1000)
+    except (OSError, OverflowError, ValueError):
+        return 0
+
+
+def _effective_position_ms(sess: PlaybackSession, now: Optional[datetime] = None) -> int:
+    """Authoritative elapsed ms for the session's current queue item.
+
+    ``position_ms`` is a snapshot that advances by wall-clock while
+    ``is_playing`` is true, anchored at ``position_updated_at``.
+    """
+    pos = max(0, int(getattr(sess, "position_ms", 0) or 0))
+    if not getattr(sess, "is_playing", False):
+        return pos
+    now = now or datetime.utcnow()
+    anchor = getattr(sess, "position_updated_at", None) or now
+    try:
+        elapsed = int((now - anchor).total_seconds() * 1000)
+    except Exception:
+        elapsed = 0
+    return pos + max(0, elapsed)
+
+
+def _anchor_position(sess: PlaybackSession, item_id: str, *, position_ms: Optional[int] = None) -> None:
+    """Point the server clock at ``item_id``.
+
+    When the tracked item changes the clock restarts (at ``position_ms`` or 0);
+    otherwise an explicit fresh position (seek/report) is applied. Either way
+    ``position_updated_at`` is stamped "now" so extrapolation resumes from here.
+    """
+    now = datetime.utcnow()
+    if str(getattr(sess, "position_item_id", "") or "") != str(item_id or ""):
+        sess.position_item_id = str(item_id or "")
+        sess.position_ms = max(0, int(position_ms or 0))
+    elif position_ms is not None:
+        sess.position_ms = max(0, int(position_ms))
+    sess.position_updated_at = now
+
+
+def _freeze_position(sess: PlaybackSession) -> None:
+    """Persist the effective position so it stops advancing (pause / stop)."""
+    sess.position_ms = _effective_position_ms(sess)
+    sess.position_updated_at = datetime.utcnow()
+
+
+def _played_ms_or_clock(sess: PlaybackSession, cur: Optional[QueueItem], payload_ms: Optional[int]) -> int:
+    """Prefer the client-reported played ms; fall back to the server clock.
+
+    Used for history/scrobble accuracy on next/prev/jump/replay, which often
+    arrive without a position payload now that the server owns the clock.
+    """
+    if payload_ms is not None and int(payload_ms or 0) > 0:
+        return max(0, int(payload_ms or 0))
+    if cur is not None and str(getattr(sess, "position_item_id", "") or "") == str(cur.id):
+        if getattr(sess, "is_playing", False):
+            return max(0, _effective_position_ms(sess, datetime.utcnow()))
+        return max(0, int(getattr(sess, "position_ms", 0) or 0))
+    return 0
+
+
+def _device_dependency(
+    x_helix_device_id: str = Header(default=""),
+    x_helix_device_name: str = Header(default=""),
+    x_helix_device_kind: str = Header(default=""),
+) -> Optional[Dict[str, str]]:
+    """Read the X-Helix-Device-* headers into a plain dict (no DB work here).
+
+    Persisting/claiming the device happens in handlers that hold a DB session.
+    """
+    did = (x_helix_device_id or "").strip()
+    if not did:
+        return None
+    return {"id": did, "name": (x_helix_device_name or "").strip(), "kind": (x_helix_device_kind or "").strip()}
+
+
+def _claim_device(db: Session, user: User, sess: PlaybackSession, device: Optional[Dict[str, str]]) -> Optional[str]:
+    """Register/touch the device and mark it active. Returns the new active id."""
+    if not device:
+        return str(getattr(sess, "active_device_id", "") or "")
+    dev = touch_or_create_device(db, user.id, device["id"], device.get("name", ""), device.get("kind", ""))
+    if dev:
+        sess.active_device_id = dev.id
+    return str(getattr(sess, "active_device_id", "") or "")
+
+
 async def _subsonic_client_from_settings(settings: Dict[str, Any]) -> SubsonicClient:
     base_url = str(settings.get("subsonic_base_url") or "").strip()
     username = str(settings.get("subsonic_username") or "").strip()
@@ -1235,6 +1330,13 @@ def state(db: Session = Depends(get_db), user: User = Depends(get_current_user))
     # Prefetch is already triggered from playback/queue-changing paths and from
     # stream fulfillment.
     _maybe_submit_now_playing(db, user.id, np=now, is_playing=bool(sess.is_playing))
+    server_now = datetime.utcnow()
+    if now is not None and str(getattr(sess, "position_item_id", "") or "") == str(now.id):
+        position_ms = max(0, int(getattr(sess, "position_ms", 0) or 0))
+        position_updated_at = getattr(sess, "position_updated_at", None) or server_now
+    else:
+        position_ms = 0
+        position_updated_at = server_now
     return PlayerStateResponse(
         is_playing=bool(sess.is_playing),
         current_index=int(sess.current_index),
@@ -1243,6 +1345,10 @@ def state(db: Session = Depends(get_db), user: User = Depends(get_current_user))
         autoplay_enabled=bool(getattr(sess, "autoplay_enabled", True)),
         active_station_id=active_station_id,
         active_station=active_station,
+        position_ms=position_ms,
+        position_updated_at_ms=_epoch_ms(position_updated_at),
+        server_time_ms=_epoch_ms(server_now),
+        active_device_id=str(getattr(sess, "active_device_id", "") or ""),
     )
 
 
@@ -1270,8 +1376,23 @@ def _maybe_submit_now_playing(db: Session, user_id: str, *, np, is_playing: bool
     )
 
 
-def _changed_state(db: Session, user: User):
+def _changed_state(db: Session, user: User, device: Optional[Dict[str, str]] = None):
     from ..realtime import schedule_player_state_broadcast
+    sess = _get_or_create_session(db, user.id)
+    items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
+    cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
+    cur_id = cur.id if cur else ""
+    changed = False
+    if device:
+        prev_active = str(getattr(sess, "active_device_id", "") or "")
+        new_active = _claim_device(db, user, sess, device)
+        if new_active != prev_active:
+            changed = True
+    if str(getattr(sess, "position_item_id", "") or "") != cur_id:
+        _anchor_position(sess, cur_id)
+        changed = True
+    if changed:
+        db.commit()
     snapshot = state(db=db, user=user)
     schedule_player_state_broadcast(user.id)
     return snapshot
@@ -1298,7 +1419,7 @@ def _clear_queue(db: Session, user_id: str, *, settings: Dict[str, Any], log_cur
     db.commit()
 
 
-async def play_track(payload: PlayerPlayTrackRequest, user: User = Depends(get_current_user)):
+async def play_track(payload: PlayerPlayTrackRequest, user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     settings = _load_settings_short()
 
     title = _clean(payload.title)
@@ -1352,12 +1473,12 @@ async def play_track(payload: PlayerPlayTrackRequest, user: User = Depends(get_c
         sess.is_playing = True
         db.commit()
 
-        return _changed_state(db=db, user=user)
+        return _changed_state(db=db, user=user, device=device)
     finally:
         db.close()
 
 
-async def play_album(payload: PlayerPlayAlbumRequest, user: User = Depends(get_current_user)):
+async def play_album(payload: PlayerPlayAlbumRequest, user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     """Play an album using the *same semantics as clicking a single track*.
 
     This endpoint must never hold a DB session across slow external calls.
@@ -1478,13 +1599,13 @@ async def play_album(payload: PlayerPlayAlbumRequest, user: User = Depends(get_c
         except Exception:
             LOG.exception("[album] failed to schedule background fill")
 
-        return _changed_state(db=db, user=user)
+        return _changed_state(db=db, user=user, device=device)
     finally:
         db.close()
 
 
 
-async def play_playlist(payload: PlayerPlayPlaylistRequest, user: User = Depends(get_current_user)):
+async def play_playlist(payload: PlayerPlayPlaylistRequest, user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     """Play a playlist as a single atomic operation (server-side expansion).
 
     The Android app previously implemented playlist playback by:
@@ -1670,7 +1791,7 @@ async def play_playlist(payload: PlayerPlayPlaylistRequest, user: User = Depends
         sess.is_playing = True
 
         db.commit()
-        return _changed_state(db=db, user=user)
+        return _changed_state(db=db, user=user, device=device)
     finally:
         db.close()
 
@@ -2027,7 +2148,7 @@ def history_set_limit(payload: Dict[str, Any], db: Session = Depends(get_db), us
     return history(limit=100, offset=0, db=db, user=user)
 
 
-async def ended(payload: Optional[PlayerActionRequest] = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+async def ended(payload: Optional[PlayerActionRequest] = None, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     settings = get_settings(db)
     sess = _get_or_create_session(db, user.id)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
@@ -2035,9 +2156,13 @@ async def ended(payload: Optional[PlayerActionRequest] = None, db: Session = Dep
     played_ms = 0
     if payload and payload.position_ms is not None:
         played_ms = int(payload.position_ms or 0)
-    # Natural completion without a reported position means the whole track played.
+    # Fall back to the server clock when no client-reported position arrived.
     if played_ms <= 0 and cur is not None:
-        played_ms = int(cur.duration_ms or 0)
+        if str(getattr(sess, "position_item_id", "") or "") == str(cur.id):
+            _freeze_position(sess)
+            played_ms = _effective_position_ms(sess, datetime.utcnow())
+        else:
+            played_ms = int(cur.duration_ms or 0)
     _push_history(db, user.id, cur, event="completed", reason="ended", played_ms=played_ms, settings=settings)
 
     # advance
@@ -2045,10 +2170,11 @@ async def ended(payload: Optional[PlayerActionRequest] = None, db: Session = Dep
         sess.current_index += 1
         sess.is_playing = True
         db.commit()
-        return _changed_state(db=db, user=user)
+        return _changed_state(db=db, user=user, device=device)
 
     # End of queue: optionally autoplay from the active station.
     sess.is_playing = False
+    _freeze_position(sess)
     db.commit()
 
     if bool(getattr(sess, "autoplay_enabled", True)) and (getattr(sess, "active_station_id", "") or ""):
@@ -2061,15 +2187,15 @@ async def ended(payload: Optional[PlayerActionRequest] = None, db: Session = Dep
             )
         except Exception as e:
             LOG.warning("autoplay append failed: %s", e)
-    return _changed_state(db=db, user=user)
+    return _changed_state(db=db, user=user, device=device)
 
 
-def jump_to(payload: PlayerJumpRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def jump_to(payload: PlayerJumpRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     settings = get_settings(db)
     sess = _get_or_create_session(db, user.id)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
-    _push_history(db, user.id, cur, event="skipped", reason="jump", played_ms=0, settings=settings)
+    _push_history(db, user.id, cur, event="skipped", reason="jump", played_ms=_played_ms_or_clock(sess, cur, None), settings=settings)
 
     if not items:
         raise HTTPException(status_code=400, detail="Queue is empty.")
@@ -2079,10 +2205,10 @@ def jump_to(payload: PlayerJumpRequest, db: Session = Depends(get_db), user: Use
     sess.current_index = idx
     sess.is_playing = _can_play(items[idx])
     db.commit()
-    return _changed_state(db=db, user=user)
+    return _changed_state(db=db, user=user, device=device)
 
 
-async def replay_from_history(payload: PlayerReplayRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+async def replay_from_history(payload: PlayerReplayRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     """Replay a song from listen history.
 
     Behavior:
@@ -2094,7 +2220,7 @@ async def replay_from_history(payload: PlayerReplayRequest, db: Session = Depend
     sess = _get_or_create_session(db, user.id)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
-    played_ms = int(payload.position_ms or 0) if payload and payload.position_ms is not None else 0
+    played_ms = _played_ms_or_clock(sess, cur, payload.position_ms if payload else None)
     _push_history(db, user.id, cur, event="skipped", reason="replay", played_ms=played_ms, settings=settings)
 
     hid = (payload.history_id or "").strip()
@@ -2136,11 +2262,11 @@ async def replay_from_history(payload: PlayerReplayRequest, db: Session = Depend
     # Advance immediately to the inserted item.
     sess.current_index = insert_idx
     sess.is_playing = _can_play(qi)
-
     db.commit()
-    return _changed_state(db=db, user=user)
+    return _changed_state(db=db, user=user, device=device)
 
-async def next_track(payload: Optional[PlayerActionRequest] = None, user: User = Depends(get_current_user)):
+
+async def next_track(payload: Optional[PlayerActionRequest] = None, user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     # DB burst: advance index, snapshot autoplay inputs
     db = SessionLocal()
     try:
@@ -2148,14 +2274,14 @@ async def next_track(payload: Optional[PlayerActionRequest] = None, user: User =
         sess = _get_or_create_session(db, user.id)
         items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
         cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
-        played_ms = int(payload.position_ms or 0) if payload and payload.position_ms is not None else 0
+        played_ms = _played_ms_or_clock(sess, cur, payload.position_ms if payload else None)
         _push_history(db, user.id, cur, event="skipped", reason="next", played_ms=played_ms, settings=settings)
 
         if not items:
             sess.is_playing = False
             sess.current_index = 0
             db.commit()
-            return _changed_state(db=db, user=user)
+            return _changed_state(db=db, user=user, device=device)
 
         active_station_id = str(getattr(sess, "active_station_id", "") or "")
         autoplay_enabled = bool(getattr(sess, "autoplay_enabled", True))
@@ -2164,7 +2290,7 @@ async def next_track(payload: Optional[PlayerActionRequest] = None, user: User =
             sess.current_index += 1
             sess.is_playing = _can_play(items[sess.current_index])
             db.commit()
-            return _changed_state(db=db, user=user)
+            return _changed_state(db=db, user=user, device=device)
 
         # End of queue
         sess.is_playing = False
@@ -2186,39 +2312,40 @@ async def next_track(payload: Optional[PlayerActionRequest] = None, user: User =
 
     db = SessionLocal()
     try:
-        return _changed_state(db=db, user=user)
+        return _changed_state(db=db, user=user, device=device)
     finally:
         db.close()
 
 
-def prev_track(payload: Optional[PlayerActionRequest] = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def prev_track(payload: Optional[PlayerActionRequest] = None, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     settings = get_settings(db)
     sess = _get_or_create_session(db, user.id)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
-    played_ms = int(payload.position_ms or 0) if payload and payload.position_ms is not None else 0
+    played_ms = _played_ms_or_clock(sess, cur, payload.position_ms if payload else None)
     _push_history(db, user.id, cur, event="skipped", reason="prev", played_ms=played_ms, settings=settings)
     if not items:
         sess.is_playing = False
         sess.current_index = 0
         db.commit()
-        return _changed_state(db=db, user=user)
+        return _changed_state(db=db, user=user, device=device)
 
     if sess.current_index > 0:
         sess.current_index -= 1
     sess.is_playing = _can_play(items[sess.current_index])
     db.commit()
-    return _changed_state(db=db, user=user)
+    return _changed_state(db=db, user=user, device=device)
 
 
-def pause(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def pause(db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     sess = _get_or_create_session(db, user.id)
+    _freeze_position(sess)
     sess.is_playing = False
     db.commit()
-    return _changed_state(db=db, user=user)
+    return _changed_state(db=db, user=user, device=device)
 
 
-def resume(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def resume(db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     sess = _get_or_create_session(db, user.id)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     if not items:
@@ -2226,8 +2353,90 @@ def resume(db: Session = Depends(get_db), user: User = Depends(get_current_user)
     if not _can_play(items[sess.current_index]):
         raise HTTPException(status_code=400, detail="Current queue item is not playable.")
     sess.is_playing = True
+    # Re-anchor the painted clock at "now" so it resumes from the frozen position.
+    _anchor_position(sess, items[sess.current_index].id)
     db.commit()
-    return _changed_state(db=db, user=user)
+    return _changed_state(db=db, user=user, device=device)
+
+
+def _current_queue_item(db: Session, user: User):
+    """Return (session, items, current item) for the user's playback session."""
+    sess = _get_or_create_session(db, user.id)
+    items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
+    cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
+    return sess, items, cur
+
+
+def _broadcast_progress(db: Session, user_id: str, cur: QueueItem) -> None:
+    sess = db.get(PlaybackSession, user_id)
+    if sess is None:
+        return
+    from ..realtime import schedule_player_progress_broadcast
+    now = datetime.utcnow()
+    schedule_player_progress_broadcast(
+        user_id,
+        queue_item_id=cur.id,
+        position_ms=_effective_position_ms(sess, now),
+        position_updated_at_ms=_epoch_ms(now),
+        server_time_ms=_epoch_ms(now),
+    )
+
+
+def _honor_active_device(sess: PlaybackSession, device: Optional[Dict[str, str]], db: Session, user: User) -> bool:
+    """Only the device that last owned playback may drive the server clock."""
+    active = str(getattr(sess, "active_device_id", "") or "")
+    if not active:
+        return True
+    if not device:
+        return False
+    dev = touch_or_create_device(db, user.id, device["id"], device.get("name", ""), device.get("kind", ""))
+    return bool(dev and dev.id == active)
+
+
+def report_position(payload: PlayerPositionRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
+    """Advance the server clock with a client-measured playing position."""
+    sess, _items, cur = _current_queue_item(db, user)
+    if cur is None:
+        raise HTTPException(status_code=400, detail="Nothing is playing.")
+    if payload.queue_item_id and str(payload.queue_item_id) != str(cur.id):
+        return state(db=db, user=user)  # stale report from a previous track
+    if not _honor_active_device(sess, device, db, user):
+        return state(db=db, user=user)  # a viewer, not the active renderer
+    _claim_device(db, user, sess, device)
+    _anchor_position(sess, cur.id, position_ms=int(payload.position_ms or 0))
+    db.commit()
+    _broadcast_progress(db, user.id, cur)
+    return state(db=db, user=user)
+
+
+def seek(payload: PlayerSeekRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
+    """Scrub the server clock (expressed in ms) for the current item."""
+    sess, _items, cur = _current_queue_item(db, user)
+    if cur is None:
+        raise HTTPException(status_code=400, detail="Nothing is playing.")
+    _claim_device(db, user, sess, device)
+    _anchor_position(sess, cur.id, position_ms=int(payload.position_ms or 0))
+    db.commit()
+    _broadcast_progress(db, user.id, cur)
+    return state(db=db, user=user)
+
+
+def player_devices(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """List the user's registered playback devices (last seen first)."""
+    sess = _get_or_create_session(db, user.id)
+    active = str(getattr(sess, "active_device_id", "") or "")
+    rows = db.execute(select(PlaybackDevice).where(PlaybackDevice.user_id == user.id).order_by(PlaybackDevice.last_seen_at.desc())).scalars().all()
+    devices = [
+        PlaybackDeviceResponse(
+            id=d.id,
+            name=d.name,
+            kind=d.kind,
+            last_seen_at=d.last_seen_at.isoformat() + "Z",
+            is_active=d.id == active,
+        )
+        for d in rows
+    ]
+    return PlayerDevicesResponse(active_device_id=active, devices=devices)
 
 
 def _stream_queue_item_snapshot(cur: QueueItem) -> SimpleNamespace:

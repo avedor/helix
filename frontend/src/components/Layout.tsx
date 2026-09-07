@@ -146,7 +146,7 @@ export function Layout() {
         )}
       </div>
       <ImportQueuedToast />
-      <PlaybackBar player={player.player} audioIntent={player.audioIntent} run={player.run} setPlayer={player.setPlayer} setError={player.setError} />
+      <PlaybackBar player={player.player} audioIntent={player.audioIntent} run={player.run} setPlayer={player.setPlayer} setError={player.setError} onTakeover={player.takeoverHere} transportBusy={player.transportBusy} />
     </div>
   )
 }
