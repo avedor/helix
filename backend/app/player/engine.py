@@ -1175,6 +1175,21 @@ def _freeze_position(sess: PlaybackSession) -> None:
     sess.position_updated_at = datetime.utcnow()
 
 
+def _played_ms_or_clock(sess: PlaybackSession, cur: Optional[QueueItem], payload_ms: Optional[int]) -> int:
+    """Prefer the client-reported played ms; fall back to the server clock.
+
+    Used for history/scrobble accuracy on next/prev/jump/replay, which often
+    arrive without a position payload now that the server owns the clock.
+    """
+    if payload_ms is not None and int(payload_ms or 0) > 0:
+        return max(0, int(payload_ms or 0))
+    if cur is not None and str(getattr(sess, "position_item_id", "") or "") == str(cur.id):
+        if getattr(sess, "is_playing", False):
+            return max(0, _effective_position_ms(sess, datetime.utcnow()))
+        return max(0, int(getattr(sess, "position_ms", 0) or 0))
+    return 0
+
+
 def _device_dependency(
     x_helix_device_id: str = Header(default=""),
     x_helix_device_name: str = Header(default=""),
@@ -1463,7 +1478,7 @@ async def play_track(payload: PlayerPlayTrackRequest, user: User = Depends(get_c
         db.close()
 
 
-async def play_album(payload: PlayerPlayAlbumRequest, user: User = Depends(get_current_user)):
+async def play_album(payload: PlayerPlayAlbumRequest, user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     """Play an album using the *same semantics as clicking a single track*.
 
     This endpoint must never hold a DB session across slow external calls.
@@ -1584,13 +1599,13 @@ async def play_album(payload: PlayerPlayAlbumRequest, user: User = Depends(get_c
         except Exception:
             LOG.exception("[album] failed to schedule background fill")
 
-        return _changed_state(db=db, user=user)
+        return _changed_state(db=db, user=user, device=device)
     finally:
         db.close()
 
 
 
-async def play_playlist(payload: PlayerPlayPlaylistRequest, user: User = Depends(get_current_user)):
+async def play_playlist(payload: PlayerPlayPlaylistRequest, user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     """Play a playlist as a single atomic operation (server-side expansion).
 
     The Android app previously implemented playlist playback by:
@@ -1776,7 +1791,7 @@ async def play_playlist(payload: PlayerPlayPlaylistRequest, user: User = Depends
         sess.is_playing = True
 
         db.commit()
-        return _changed_state(db=db, user=user)
+        return _changed_state(db=db, user=user, device=device)
     finally:
         db.close()
 
@@ -2180,7 +2195,7 @@ def jump_to(payload: PlayerJumpRequest, db: Session = Depends(get_db), user: Use
     sess = _get_or_create_session(db, user.id)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
-    _push_history(db, user.id, cur, event="skipped", reason="jump", played_ms=0, settings=settings)
+    _push_history(db, user.id, cur, event="skipped", reason="jump", played_ms=_played_ms_or_clock(sess, cur, None), settings=settings)
 
     if not items:
         raise HTTPException(status_code=400, detail="Queue is empty.")
@@ -2205,7 +2220,7 @@ async def replay_from_history(payload: PlayerReplayRequest, db: Session = Depend
     sess = _get_or_create_session(db, user.id)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
-    played_ms = int(payload.position_ms or 0) if payload and payload.position_ms is not None else 0
+    played_ms = _played_ms_or_clock(sess, cur, payload.position_ms if payload else None)
     _push_history(db, user.id, cur, event="skipped", reason="replay", played_ms=played_ms, settings=settings)
 
     hid = (payload.history_id or "").strip()
@@ -2259,7 +2274,7 @@ async def next_track(payload: Optional[PlayerActionRequest] = None, user: User =
         sess = _get_or_create_session(db, user.id)
         items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
         cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
-        played_ms = int(payload.position_ms or 0) if payload and payload.position_ms is not None else 0
+        played_ms = _played_ms_or_clock(sess, cur, payload.position_ms if payload else None)
         _push_history(db, user.id, cur, event="skipped", reason="next", played_ms=played_ms, settings=settings)
 
         if not items:
@@ -2307,7 +2322,7 @@ def prev_track(payload: Optional[PlayerActionRequest] = None, db: Session = Depe
     sess = _get_or_create_session(db, user.id)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
-    played_ms = int(payload.position_ms or 0) if payload and payload.position_ms is not None else 0
+    played_ms = _played_ms_or_clock(sess, cur, payload.position_ms if payload else None)
     _push_history(db, user.id, cur, event="skipped", reason="prev", played_ms=played_ms, settings=settings)
     if not items:
         sess.is_playing = False
