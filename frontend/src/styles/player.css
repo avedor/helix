@@ -216,6 +216,28 @@ nav a.active {
   color: color-mix(in srgb, var(--danger) 45%, var(--text));
 }
 
+.audio-player-status {
+  min-height: 1rem;
+}
+
+.sync-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+.sync-hint::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
 @media (max-width: 1100px) {
   .now-playing {
     max-width: none;

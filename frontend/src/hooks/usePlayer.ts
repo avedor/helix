@@ -15,6 +15,7 @@ export function usePlayer() {
   const transportInFlightRef = useRef<Promise<PlayerState> | null>(null)
   const socketOpenRef = useRef(false)
   const lastSocketSeqRef = useRef(0)
+  const lastProgressSeqRef = useRef(0)
 
   const refresh = useCallback(async () => {
     if (actionInFlightRef.current) return
@@ -121,11 +122,41 @@ export function usePlayer() {
       }
       socket.onmessage = (event) => {
         try {
-          const message = JSON.parse(event.data) as { type?: string; seq?: number; state?: PlayerState }
-          if (message.type !== 'player.state' || !message.state) return
+          const message = JSON.parse(event.data) as {
+            type?: string
+            seq?: number
+            state?: PlayerState
+            queue_item_id?: string
+            position_ms?: number
+            position_updated_at_ms?: number
+            server_time_ms?: number
+          }
 
           const seq = Number(message.seq || 0)
-          if (seq && seq <= lastSocketSeqRef.current) return
+          if (message.type === 'player.progress') {
+            if (seq && seq <= lastProgressSeqRef.current) return
+            if (seq) lastProgressSeqRef.current = seq
+            if (actionInFlightRef.current) return
+
+            // A lightweight clock snapshot (no queue). Merge the fresh fields so
+            // viewers keep a smooth scrubber between full state broadcasts.
+            setPlayer((current) => {
+              if (!current || !current.now_playing || current.now_playing.id !== message.queue_item_id) return current
+              if (typeof message.position_ms !== 'number') return current
+              return {
+                ...current,
+                position_ms: message.position_ms,
+                position_updated_at_ms: typeof message.position_updated_at_ms === 'number' ? message.position_updated_at_ms : current.position_updated_at_ms,
+                server_time_ms: typeof message.server_time_ms === 'number' ? message.server_time_ms : current.server_time_ms,
+              }
+            })
+            return
+          }
+
+          if (message.type !== 'player.state' || !message.state) return
+
+          // Never overlay an older full snapshot over fresher progress.
+          if (seq && seq <= Math.max(lastSocketSeqRef.current, lastProgressSeqRef.current)) return
           if (seq) lastSocketSeqRef.current = seq
 
           if (actionInFlightRef.current) return
@@ -157,5 +188,17 @@ export function usePlayer() {
     }
   }, [refresh])
 
-  return { player, loading, error, refresh, run, setPlayer, setError, audioIntent, transportBusy }
+  // Claim playback on this device: the backend's transport endpoints already
+  // make the calling device the active renderer, so resuming is enough; then
+  // force the local audio element to reload from the server-authoritative
+  // position rather than its stale currentTime.
+  const takeoverHere = useCallback(() => {
+    const promise = run(api.resume)
+    void promise.then(() => {
+      setAudioIntent((current) => ({ id: current.id + 1, action: 'takeover' }))
+    }).catch(() => undefined)
+    return promise
+  }, [run])
+
+  return { player, loading, error, refresh, run, setPlayer, setError, audioIntent, transportBusy, takeoverHere }
 }

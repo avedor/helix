@@ -7,6 +7,7 @@ import { Artwork } from './Artwork'
 import { ArtistLink } from './ArtistLink'
 import { AlbumLink } from './AlbumLink'
 import { AudioPlayer } from './AudioPlayer'
+import { deviceId } from '../device'
 
 type PlaybarStyle = 'helix' | 'ytmusic' | 'spotify' | 'pandora'
 type SkipDirection = 'previous' | 'next'
@@ -19,6 +20,8 @@ type Props = {
   run: (action: () => Promise<PlayerState>, audioMode?: AudioRunMode) => Promise<PlayerState>
   setPlayer: (player: PlayerState) => void
   setError?: (message: string) => void
+  onTakeover: () => Promise<PlayerState>
+  transportBusy?: boolean
 }
 
 function IconThumbDown() {
@@ -73,7 +76,7 @@ function isPlaybarStyle(value: unknown): value is PlaybarStyle {
   return value === 'helix' || value === 'ytmusic' || value === 'spotify' || value === 'pandora'
 }
 
-export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: Props) {
+export function PlaybackBar({ player, audioIntent, run, setPlayer, setError, onTakeover, transportBusy = false }: Props) {
   const navigate = useNavigate()
   const barRef = useRef<HTMLElement | null>(null)
   const [localPlaying, setLocalPlaying] = useState(false)
@@ -84,10 +87,27 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
   const [playbarStyle, setPlaybarStyle] = useState<PlaybarStyle>('helix')
   const [skipDirection, setSkipDirection] = useState<SkipDirection | null>(null)
   const skipFeedbackTimerRef = useRef<number | null>(null)
+  const [syncedDeviceName, setSyncedDeviceName] = useState('')
   const now = player?.now_playing
   const hasTrack = Boolean(now)
   const shouldKeepPlaying = Boolean(player?.is_playing || localPlaying)
   const trackIdentity = `${now?.subsonic_song_id ?? ''}|${now?.yt_video_id ?? ''}|${now?.id ?? ''}`
+  const otherDeviceActive = Boolean(now && player?.active_device_id && player.active_device_id !== deviceId())
+  const syncedDeviceId = otherDeviceActive ? player?.active_device_id ?? '' : ''
+
+  useEffect(() => {
+    if (!syncedDeviceId) {
+      setSyncedDeviceName('')
+      return
+    }
+    let cancelled = false
+    void api.playerDevices().then((payload) => {
+      if (cancelled) return
+      const device = payload.devices.find((candidate) => candidate.id === syncedDeviceId)
+      setSyncedDeviceName(device?.name ?? '')
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [syncedDeviceId])
 
   useEffect(() => {
     let cancelled = false
@@ -257,11 +277,15 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
             <IconPrevious />
           </button>
           {localPlaying ? (
-            <button className="primary transport-main" aria-label="Pause" title="Pause" onClick={() => run(api.pause, 'pause')} disabled={!hasTrack}>
+            <button className="primary transport-main" aria-label="Pause" title="Pause" onClick={() => run(api.pause, 'pause')} disabled={!hasTrack || transportBusy}>
               <IconPause />
             </button>
+          ) : otherDeviceActive ? (
+            <button className="primary transport-main" aria-label="Take over playback" title={syncedDeviceName ? `Play here instead of ${syncedDeviceName}` : 'Play here on this device'} onClick={() => void onTakeover()} disabled={!hasTrack || transportBusy}>
+              <IconPlay />
+            </button>
           ) : (
-            <button className="primary transport-main" aria-label="Play" title="Play" onClick={() => run(api.resume, 'play')} disabled={!hasTrack}>
+            <button className="primary transport-main" aria-label="Play" title="Play" onClick={() => run(api.resume, 'play')} disabled={!hasTrack || transportBusy}>
               <IconPlay />
             </button>
           )}
@@ -290,6 +314,7 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
         repeatTrack={repeatTrack}
         onLocalPlayingChange={setLocalPlaying}
         onError={setError}
+        syncedDeviceName={syncedDeviceName}
       />
       <div
         className="ytmusic-seek-hitbox"

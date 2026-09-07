@@ -318,7 +318,7 @@ export type DislikeState = {
 
 export type AudioIntent = {
   id: number
-  action: 'play' | 'pause'
+  action: 'play' | 'pause' | 'takeover'
 }
 
 
