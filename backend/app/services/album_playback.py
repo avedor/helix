@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import Depends, HTTPException
 
@@ -137,6 +137,7 @@ def _queue_items_from_subsonic_album(
 async def play_album(
     payload: PlayerPlayAlbumRequest,
     user: User = Depends(get_current_user),
+    device: Optional[dict[str, str]] = Depends(player_engine._device_dependency),
 ):
     album_id = _clean(payload.subsonic_album_id or payload.browse_id)
     settings = player_engine._load_settings_short()
@@ -150,7 +151,7 @@ async def play_album(
     if local_album is None:
         if album_id and not album_id.startswith("MPRE"):
             raise HTTPException(status_code=404, detail="Could not resolve this album in Subsonic or YouTube Music.")
-        return await player_engine.play_album(payload, user)
+        return await player_engine.play_album(payload, user, device=device)
 
     queue_items = _queue_items_from_subsonic_album(
         local_album,
@@ -174,7 +175,7 @@ async def play_album(
         sess.current_index = 0
         sess.is_playing = True
         db.commit()
-        return player_engine._changed_state(db=db, user=user)
+        return player_engine._changed_state(db=db, user=user, device=device)
     finally:
         db.close()
 
