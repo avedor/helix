@@ -1,11 +1,12 @@
-import type { AlbumDetail, ArtistAlbumsResponse, ArtistDetail, ArtistPopularResponse, ArtistSimilarResponse, DislikeState, HomeSummary, LikeState, PlaybackHistoryFilters, PlaybackHistoryResponse, PlayerState, Playlist, PlaylistDetail, QueueItem, SearchAlbum, SearchArtist, SearchMode, SearchResponse, SearchSong, Station, StationProviderInfo, AdminUser, Capabilities, User, UserSettingsPayload, UserSettings, LobbyJoinResponse, LobbyListResponse, LobbyPermissions, LobbyState, PlaylistImportPreview, PlaylistImportSource, PlaylistImportCandidate, SpotifyConnectionStatus, SpotifyPlaylist, SpotifyPlaylistList, SubsonicArtistResponse, SubsonicLibraryAlbumsResponse, SubsonicLibraryArtistsResponse, SubsonicLibraryPlaylistsResponse, SubsonicLibrarySongsResponse, SubsonicPlaylistDetail } from './types'
+import type { AlbumDetail, ArtistAlbumsResponse, ArtistDetail, ArtistPopularResponse, ArtistSimilarResponse, DislikeState, HomeSummary, LikeState, PlaybackHistoryFilters, PlaybackHistoryResponse, PlayerState, PlayerDevicesResponse, Playlist, PlaylistDetail, QueueItem, SearchAlbum, SearchArtist, SearchMode, SearchResponse, SearchSong, Station, StationProviderInfo, AdminUser, Capabilities, User, UserSettingsPayload, UserSettings, LobbyJoinResponse, LobbyListResponse, LobbyPermissions, LobbyState, PlaylistImportPreview, PlaylistImportSource, PlaylistImportCandidate, SpotifyConnectionStatus, SpotifyPlaylist, SpotifyPlaylistList, SubsonicArtistResponse, SubsonicLibraryAlbumsResponse, SubsonicLibraryArtistsResponse, SubsonicLibraryPlaylistsResponse, SubsonicLibrarySongsResponse, SubsonicPlaylistDetail } from './types'
+import { deviceHeaders } from '../device'
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const { headers, ...rest } = options
   const res = await fetch(path, {
     credentials: 'include',
     ...rest,
-    headers: { 'Content-Type': 'application/json', ...(headers ?? {}) },
+    headers: { 'Content-Type': 'application/json', ...deviceHeaders(), ...(headers ?? {}) },
   })
 
   const responseText = await res.text()
@@ -269,7 +270,17 @@ export const api = {
   resetUserSettings: () => request<UserSettingsPayload>('/api/user/settings', { method: 'DELETE' }),
 
   playerState: () => request<PlayerState>(`/api/playback/state?t=${Date.now()}`, { cache: 'no-store' }),
-  playerSocketUrl: () => websocketUrl('/ws/player'),
+  playerSocketUrl: () => {
+    const base = websocketUrl('/ws/player')
+    const device = deviceHeaders()
+    if (!device['X-Helix-Device-Id']) return base
+    const params = new URLSearchParams({
+      device_id: device['X-Helix-Device-Id'],
+      device_name: device['X-Helix-Device-Name'],
+      device_kind: device['X-Helix-Device-Kind'],
+    })
+    return `${base}?${params.toString()}`
+  },
   playSong: (song: SearchSong) => request<PlayerState>('/api/playback/track', { method: 'POST', body: JSON.stringify(songToPayload(song)) }),
   playAlbum: (album: SearchAlbum) => request<PlayerState>('/api/playback/album', { method: 'POST', body: JSON.stringify(albumToPayload(album)) }),
   playPlaylist: (playlistId: string, shuffle = false) => request<PlayerState>('/api/playback/playlist', { method: 'POST', body: JSON.stringify({ playlist_id: playlistId, shuffle }) }),
@@ -283,6 +294,9 @@ export const api = {
   }),
   jump: (index: number) => request<PlayerState>('/api/playback/jump', { method: 'POST', body: JSON.stringify({ index }) }),
   setAutoplay: (enabled: boolean) => request<PlayerState>('/api/playback/autoplay', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  seek: (positionMs: number) => request<PlayerState>('/api/playback/seek', { method: 'POST', body: JSON.stringify({ position_ms: Math.max(0, Math.round(positionMs)) }) }),
+  reportPosition: (queueItemId: string, positionMs: number) => request<PlayerState>('/api/playback/position', { method: 'POST', body: JSON.stringify({ queue_item_id: queueItemId, position_ms: Math.max(0, Math.round(positionMs)) }) }),
+  playerDevices: () => request<PlayerDevicesResponse>('/api/player/devices'),
 
   isLiked: (item: QueueItem) => request<LikeState>(`/api/likes/is-liked?${identityQuery(item)}`),
   toggleLike: (item: QueueItem) => request<LikeState>('/api/likes/toggle', { method: 'POST', body: JSON.stringify(queueItemToRatingPayload(item)) }),

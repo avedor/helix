@@ -53,6 +53,7 @@ from .routers.user_settings import router as user_settings_router
 from .routers.realtime import router as realtime_router
 from .routers.quality_upgrades import router as quality_upgrades_router
 from .routers.spotify import router as spotify_router
+from .routers.devices import router as devices_router
 
 logging.basicConfig(
     level=getattr(logging, os.getenv("HELIX_LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -215,6 +216,7 @@ app.include_router(realtime_router)
 app.include_router(user_settings_router)
 app.include_router(lyrics_router)
 app.include_router(spotify_router)
+app.include_router(devices_router)
 
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"

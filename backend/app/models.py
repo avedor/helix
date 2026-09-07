@@ -130,6 +130,18 @@ class PlaybackSession(Base):
     autoplay_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # If set, autoplay pulls from this station.
     active_station_id: Mapped[str] = mapped_column(String(36), nullable=False, default="")
+
+    # Server-authoritative playback clock, mirroring the shared-lobby clock.
+    # `position_item_id` is the queue item the position refers to; when it no
+    # longer matches the current track the clock resets to 0. `position_ms` is a
+    # snapshot that only advances via wall-clock extrapolation from
+    # `position_updated_at` while `is_playing` is true.
+    position_ms: Mapped[int] = mapped_column(nullable=False, default=0)
+    position_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    position_item_id: Mapped[str] = mapped_column(String(36), nullable=False, default="")
+    # Identity of the device currently controlling playback ("" = none claimed).
+    active_device_id: Mapped[str] = mapped_column(String(36), nullable=False, default="")
+
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     user: Mapped["User"] = relationship("User")
@@ -176,6 +188,27 @@ class QueueItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     session: Mapped["PlaybackSession"] = relationship("PlaybackSession", back_populates="queue_items")
+
+
+class PlaybackDevice(Base):
+    """A named renderer/controller for a user's playback (web, Android, future Cast).
+
+    Devices are lazily registered when a client identifies itself via the
+    X-Helix-Device-Id header on API calls or the device_id WebSocket query
+    parameter. `PlaybackSession.active_device_id` points at the device that last
+    owned playback so only it may advance the server clock.
+    """
+
+    __tablename__ = "playback_devices"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)  # client-generated stable id
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")  # web | android | cast | unknown
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship("User")
 
 
 

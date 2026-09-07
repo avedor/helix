@@ -36,6 +36,13 @@ class PlayerStateResponse(BaseModel):
     autoplay_enabled: bool = True
     active_station_id: str = ""
     active_station: Optional[StationResponse] = None
+    # Server-authoritative playback clock. Clients derive the effective position:
+    # position_ms + (is_playing ? (server_now - position_updated_at_ms) : 0),
+    # where server_now is reconstructed from server_time_ms + local offset.
+    position_ms: int = 0
+    position_updated_at_ms: int = 0
+    server_time_ms: int = 0
+    active_device_id: str = ""
 
 
 class PlayerPlayTrackRequest(BaseModel):
@@ -136,6 +143,23 @@ class PlayerHistoryResponse(BaseModel):
 class PlayerPositionRequest(BaseModel):
     queue_item_id: Optional[str] = None
     position_ms: int = 0
+
+
+class PlayerSeekRequest(BaseModel):
+    position_ms: int = 0
+
+
+class PlaybackDeviceResponse(BaseModel):
+    id: str
+    name: str = ""
+    kind: str = "unknown"
+    last_seen_at: str = ""
+    is_active: bool = False
+
+
+class PlayerDevicesResponse(BaseModel):
+    active_device_id: str = ""
+    devices: list[PlaybackDeviceResponse] = []
 
 
 class PlayerActionRequest(BaseModel):

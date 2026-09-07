@@ -138,6 +138,18 @@ def init_db() -> None:
         except Exception:
             logger.exception("Queue item position uniqueness migration failed")
 
+        # --- playback_sessions server-authoritative clock columns ---
+        ps_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(playback_sessions)")).fetchall()}
+        if ps_cols:
+            if "position_ms" not in ps_cols:
+                conn.execute(text("ALTER TABLE playback_sessions ADD COLUMN position_ms INTEGER NOT NULL DEFAULT 0"))
+            if "position_updated_at" not in ps_cols:
+                conn.execute(text("ALTER TABLE playback_sessions ADD COLUMN position_updated_at DATETIME"))
+            if "position_item_id" not in ps_cols:
+                conn.execute(text("ALTER TABLE playback_sessions ADD COLUMN position_item_id VARCHAR(36) NOT NULL DEFAULT ''"))
+            if "active_device_id" not in ps_cols:
+                conn.execute(text("ALTER TABLE playback_sessions ADD COLUMN active_device_id VARCHAR(36) NOT NULL DEFAULT ''"))
+
 
 
 

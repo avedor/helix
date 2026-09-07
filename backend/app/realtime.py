@@ -82,6 +82,37 @@ async def broadcast_player_state(user_id: str) -> None:
         except Exception:
             HUB.unregister_player(user_id, ws)
 
+
+async def broadcast_player_progress(
+    user_id: str,
+    *,
+    queue_item_id: str,
+    position_ms: int,
+    position_updated_at_ms: int,
+    server_time_ms: int,
+) -> None:
+    """Lightweight player-clock fanout (no full queue snapshot).
+
+    Sent on periodic position reports and seeks so secondary clients can keep a
+    smooth scrubber without the cost of a full state broadcast every few seconds.
+    """
+    sockets = list(HUB.player.get(user_id, ()))
+    if not sockets:
+        return
+    msg = {
+        "type": "player.progress",
+        "seq": HUB.next_seq(),
+        "queue_item_id": queue_item_id,
+        "position_ms": position_ms,
+        "position_updated_at_ms": position_updated_at_ms,
+        "server_time_ms": server_time_ms,
+    }
+    for ws in sockets:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            HUB.unregister_player(user_id, ws)
+
 async def broadcast_lobby_state(lobby_id: str) -> None:
     conns = list(HUB.lobbies.get(lobby_id, ()))
     if not conns:
@@ -135,6 +166,25 @@ def _schedule(coro) -> None:
 
 def schedule_player_state_broadcast(user_id: str) -> None:
     _schedule(broadcast_player_state(user_id))
+
+
+def schedule_player_progress_broadcast(
+    user_id: str,
+    *,
+    queue_item_id: str,
+    position_ms: int,
+    position_updated_at_ms: int,
+    server_time_ms: int,
+) -> None:
+    _schedule(
+        broadcast_player_progress(
+            user_id,
+            queue_item_id=queue_item_id,
+            position_ms=position_ms,
+            position_updated_at_ms=position_updated_at_ms,
+            server_time_ms=server_time_ms,
+        )
+    )
 
 def schedule_lobby_state_broadcast(lobby_id: str) -> None:
     _schedule(broadcast_lobby_state(lobby_id))
