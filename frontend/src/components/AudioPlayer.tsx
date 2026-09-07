@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import type { AudioIntent, PlayerState } from '../api/types'
+import { deviceId } from '../device'
 
 type Props = {
   player: PlayerState | null
@@ -9,6 +10,7 @@ type Props = {
   repeatTrack?: boolean
   onLocalPlayingChange?: (playing: boolean) => void
   onError?: (message: string) => void
+  syncedDeviceName?: string
 }
 
 function streamUrl(queueItemId: string) {
@@ -54,7 +56,7 @@ function effectiveServerPositionMs(state: PlayerState | null, itemId: string): n
   return Math.max(0, Math.round(base + Math.max(0, Date.now() + offset - anchor)))
 }
 
-export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, onLocalPlayingChange, onError }: Props) {
+export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, onLocalPlayingChange, onError, syncedDeviceName = '' }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const currentItemIdRef = useRef<string>('')
   const pendingRestoreRef = useRef(0)
@@ -65,11 +67,18 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
   const [audioError, setAudioError] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
+  const [locallyPlaying, setLocallyPlaying] = useState(false)
+  const [viewerPosition, setViewerPosition] = useState(0)
   const [volume, setVolume] = useState(() => {
     const saved = window.localStorage.getItem('helix.volume')
     const parsed = saved === null ? Number.NaN : Number(saved)
     return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0.85
   })
+
+  function markLocalPlaying(playing: boolean) {
+    setLocallyPlaying(playing)
+    onLocalPlayingChange?.(playing)
+  }
 
   useEffect(() => {
     if (window.localStorage.getItem('helix.volume') !== null) return
@@ -82,6 +91,11 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
 
   const now = player?.now_playing ?? null
   const nowId = now?.id ?? ''
+  const myDeviceId = deviceId()
+  const isActiveRenderer = Boolean(player?.active_device_id && player.active_device_id === myDeviceId)
+  // A different device owns the playback clock. As long as we are not making
+  // sound ourselves, mirror the server position instead of our stale element.
+  const viewerMode = Boolean(nowId) && Boolean(player?.active_device_id) && !isActiveRenderer && !locallyPlaying
 
   useEffect(() => {
     const audio = audioRef.current
@@ -96,7 +110,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
       audio.load()
       setCurrentTime(0)
       setDuration(0)
-      onLocalPlayingChange?.(false)
+      markLocalPlaying(false)
       return
     }
 
@@ -111,7 +125,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
       audio.load()
       setCurrentTime(pendingRestoreRef.current)
       setDuration(0)
-      onLocalPlayingChange?.(false)
+      markLocalPlaying(false)
     }
   }, [audioIntent.id, nowId, onLocalPlayingChange])
 
@@ -125,7 +139,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     if (audioIntent.action === 'pause') {
       audio.pause()
       continueAfterEndedRef.current = false
-      onLocalPlayingChange?.(false)
+      markLocalPlaying(false)
       return
     }
 
@@ -141,18 +155,49 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
       setAudioError('')
       audio.play().then(() => {
         if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nowId) return
-        onLocalPlayingChange?.(true)
+        markLocalPlaying(true)
       }).catch((err) => {
         if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nowId) return
         const name = err instanceof DOMException ? err.name : ''
         if (name === 'AbortError' || name === 'NotAllowedError') {
-          onLocalPlayingChange?.(false)
+          markLocalPlaying(false)
           return
         }
         const message = err instanceof Error ? err.message : 'Browser blocked audio playback'
         setAudioError(message)
         onError?.(message)
-        onLocalPlayingChange?.(false)
+        markLocalPlaying(false)
+      })
+      return
+    }
+
+    // Take over from another renderer: reload the element and resume from the
+    // server-authoritative position instead of our (stale) currentTime.
+    if (audioIntent.action === 'takeover' && nowId) {
+      currentItemIdRef.current = nowId
+      playAttemptRef.current += 1
+      audio.pause()
+      audio.src = streamUrl(nowId)
+      pendingRestoreRef.current = effectiveServerPositionMs(player, nowId)
+      audio.load()
+      setCurrentTime(pendingRestoreRef.current)
+      setDuration(0)
+      const attemptId = ++playAttemptRef.current
+      setAudioError('')
+      audio.play().then(() => {
+        if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nowId) return
+        markLocalPlaying(true)
+      }).catch((err) => {
+        if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nowId) return
+        const name = err instanceof DOMException ? err.name : ''
+        if (name === 'AbortError' || name === 'NotAllowedError') {
+          markLocalPlaying(false)
+          return
+        }
+        const message = err instanceof Error ? err.message : 'Browser blocked audio playback'
+        setAudioError(message)
+        onError?.(message)
+        markLocalPlaying(false)
       })
     }
   }, [audioIntent, nowId, onError, onLocalPlayingChange])
@@ -165,16 +210,36 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
   }, [volume])
 
   useEffect(() => {
-    if (!nowId) return
+    if (!nowId || viewerMode) return
     const timer = window.setInterval(() => maybeReportPosition(false), 4000)
     return () => window.clearInterval(timer)
-  }, [nowId])
+  }, [nowId, viewerMode])
+
+  useEffect(() => {
+    if (!viewerMode) return
+    const tick = () => setViewerPosition(effectiveServerPositionMs(player, nowId))
+    tick()
+    const timer = window.setInterval(tick, 1000)
+    return () => window.clearInterval(timer)
+  }, [viewerMode, player, nowId])
+
+  // Another device claimed the playback clock while we were rendering: yield.
+  useEffect(() => {
+    if (!player?.active_device_id || player.active_device_id === myDeviceId) return
+    if (!nowId || !locallyPlaying) return
+    const audio = audioRef.current
+    if (audio && !audio.paused) {
+      audio.pause()
+      continueAfterEndedRef.current = false
+    }
+    markLocalPlaying(false)
+  }, [player?.active_device_id, nowId, locallyPlaying, myDeviceId])
 
   async function handleEnded() {
     const endedItemId = currentItemIdRef.current
     const shouldContinue = continueAfterEndedRef.current
     clearPosition(endedItemId)
-    onLocalPlayingChange?.(false)
+    markLocalPlaying(false)
 
     try {
       setAudioError('')
@@ -199,11 +264,11 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
           void audio.play().then(() => {
             if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== next.now_playing?.id) return
             continueAfterEndedRef.current = true
-            onLocalPlayingChange?.(true)
+            markLocalPlaying(true)
           }).catch(() => {
             if (attemptId !== playAttemptRef.current) return
             continueAfterEndedRef.current = false
-            onLocalPlayingChange?.(false)
+            markLocalPlaying(false)
           })
         }, 0)
       } else {
@@ -216,7 +281,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
             audio.load()
           }
         }
-        onLocalPlayingChange?.(false)
+        markLocalPlaying(false)
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not advance playback'
@@ -231,7 +296,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     const message = audio.error ? `Audio playback error ${audio.error.code}` : 'Audio playback failed'
     setAudioError(message)
     onError?.(message)
-    onLocalPlayingChange?.(false)
+    markLocalPlaying(false)
   }
 
   function seek(seconds: number) {
@@ -255,6 +320,9 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     void api.reportPosition(itemId, Math.round(audio.currentTime * 1000)).catch(() => undefined)
   }
 
+  const displayTime = viewerMode ? viewerPosition : currentTime
+  const displayDuration = viewerMode ? (now?.duration_ms ?? 0) / 1000 : duration
+
   return (
     <div className="audio-player">
       <audio
@@ -268,11 +336,11 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
             maybeReportPosition(true)
             continueAfterEndedRef.current = false
           }
-          onLocalPlayingChange?.(false)
+          markLocalPlaying(false)
         }}
         onPlay={() => {
           continueAfterEndedRef.current = true
-          onLocalPlayingChange?.(true)
+          markLocalPlaying(true)
         }}
         onLoadedMetadata={(event) => {
           const audio = event.currentTarget
@@ -294,20 +362,26 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
         }}
       />
 
+      <div className="audio-player-status">
+        {viewerMode ? (
+          <div className="sync-hint">Playing on {syncedDeviceName || 'another device'}</div>
+        ) : null}
+      </div>
+
       <div className="scrub-row">
-        <span>{formatTime(currentTime)}</span>
+        <span>{formatTime(displayTime)}</span>
         <input
           aria-label="Playback position"
           className="scrub-input"
           type="range"
           min="0"
-          max={duration || 0}
+          max={displayDuration || 0}
           step="1"
-          value={Math.min(currentTime, duration || currentTime)}
-          disabled={!nowId || !duration}
+          value={Math.min(displayTime, displayDuration || displayTime)}
+          disabled={!nowId || !displayDuration || viewerMode}
           onChange={(event) => seek(Number(event.target.value))}
         />
-        <span>{formatTime(duration)}</span>
+        <span>{formatTime(displayDuration)}</span>
       </div>
 
       <div className="volume-row">
