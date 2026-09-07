@@ -42,6 +42,18 @@ function clearPosition(queueItemId: string) {
   window.localStorage.removeItem(positionKey(queueItemId))
 }
 
+// Reconstruct the server-side playing clock for a queue item. `server_time_ms` is
+// the server's wall clock at state build time; the client derives the offset once
+// and extrapolates from `position_updated_at_ms`.
+function effectiveServerPositionMs(state: PlayerState | null, itemId: string): number {
+  if (!state || !state.now_playing || state.now_playing.id !== itemId) return 0
+  const base = state.position_ms || 0
+  if (!state.is_playing) return Math.max(0, Math.round(base))
+  const anchor = state.position_updated_at_ms || 0
+  const offset = (state.server_time_ms || 0) - Date.now()
+  return Math.max(0, Math.round(base + Math.max(0, Date.now() + offset - anchor)))
+}
+
 export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, onLocalPlayingChange, onError }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const currentItemIdRef = useRef<string>('')
@@ -49,6 +61,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
   const lastIntentIdRef = useRef(0)
   const continueAfterEndedRef = useRef(false)
   const playAttemptRef = useRef(0)
+  const lastReportAtRef = useRef(0)
   const [audioError, setAudioError] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -92,7 +105,9 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
       playAttemptRef.current += 1
       audio.pause()
       audio.src = streamUrl(nowId)
-      pendingRestoreRef.current = audioIntent.id !== lastIntentIdRef.current ? 0 : readSavedPosition(nowId)
+      const serverPosition = effectiveServerPositionMs(player, nowId)
+      const saved = audioIntent.id !== lastIntentIdRef.current ? 0 : readSavedPosition(nowId)
+      pendingRestoreRef.current = serverPosition > 0 ? serverPosition : saved
       audio.load()
       setCurrentTime(pendingRestoreRef.current)
       setDuration(0)
@@ -118,7 +133,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
       if (currentItemIdRef.current !== nowId) {
         currentItemIdRef.current = nowId
         audio.src = streamUrl(nowId)
-        pendingRestoreRef.current = 0
+        pendingRestoreRef.current = effectiveServerPositionMs(player, nowId)
         audio.load()
       }
 
@@ -148,6 +163,12 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     audio.volume = volume
     window.localStorage.setItem('helix.volume', String(volume))
   }, [volume])
+
+  useEffect(() => {
+    if (!nowId) return
+    const timer = window.setInterval(() => maybeReportPosition(false), 4000)
+    return () => window.clearInterval(timer)
+  }, [nowId])
 
   async function handleEnded() {
     const endedItemId = currentItemIdRef.current
@@ -219,6 +240,19 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     audio.currentTime = seconds
     setCurrentTime(seconds)
     savePosition(currentItemIdRef.current, seconds)
+    lastReportAtRef.current = Date.now()
+    void api.seek(Math.round(seconds * 1000)).catch(() => undefined)
+  }
+
+  function maybeReportPosition(force = false) {
+    const audio = audioRef.current
+    const itemId = currentItemIdRef.current
+    if (!itemId || !audio) return
+    if (!force && (audio.paused || audio.ended)) return
+    const now = Date.now()
+    if (!force && now - lastReportAtRef.current < 3500) return
+    lastReportAtRef.current = now
+    void api.reportPosition(itemId, Math.round(audio.currentTime * 1000)).catch(() => undefined)
   }
 
   return (
@@ -230,7 +264,10 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
         onEnded={handleEnded}
         onError={handleError}
         onPause={(event) => {
-          if (!event.currentTarget.ended) continueAfterEndedRef.current = false
+          if (!event.currentTarget.ended) {
+            maybeReportPosition(true)
+            continueAfterEndedRef.current = false
+          }
           onLocalPlayingChange?.(false)
         }}
         onPlay={() => {

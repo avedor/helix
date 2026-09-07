@@ -36,6 +36,21 @@ async def player_socket(ws: WebSocket):
     if not user:
         await ws.close(code=4401)
         return
+    device_id = (ws.query_params.get("device_id") or "").strip()
+    if device_id:
+        from ..devices import touch_or_create_device
+        db = SessionLocal()
+        try:
+            touch_or_create_device(
+                db,
+                user.id,
+                device_id,
+                name=(ws.query_params.get("device_name") or "").strip(),
+                kind=(ws.query_params.get("device_kind") or "").strip(),
+            )
+            db.commit()
+        finally:
+            db.close()
     await ws.accept()
     await HUB.register_player(user.id, ws)
     await broadcast_player_state(user.id)

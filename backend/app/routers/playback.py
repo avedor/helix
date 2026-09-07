@@ -9,8 +9,11 @@ from ..api_schemas.player import (
     PlayerPlayAlbumRequest,
     PlayerPlayPlaylistRequest,
     PlayerPlayTrackRequest,
+    PlayerPositionRequest,
     PlayerReplayRequest,
+    PlayerSeekRequest,
     PlayerStateResponse,
+    PlayerDevicesResponse,
 )
 from ..player import engine as player_engine
 from ..services import album_playback
@@ -29,3 +32,5 @@ router.add_api_route("/next", player_engine.next_track, methods=["POST"], respon
 router.add_api_route("/previous", player_engine.prev_track, methods=["POST"], response_model=PlayerStateResponse)
 router.add_api_route("/pause", player_engine.pause, methods=["POST"], response_model=PlayerStateResponse)
 router.add_api_route("/resume", player_engine.resume, methods=["POST"], response_model=PlayerStateResponse)
+router.add_api_route("/position", player_engine.report_position, methods=["POST"], response_model=PlayerStateResponse)
+router.add_api_route("/seek", player_engine.seek, methods=["POST"], response_model=PlayerStateResponse)

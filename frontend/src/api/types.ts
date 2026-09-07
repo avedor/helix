@@ -30,6 +30,23 @@ export type PlayerState = {
   autoplay_enabled: boolean
   active_station_id: string
   active_station?: Station | null
+  position_ms: number
+  position_updated_at_ms: number
+  server_time_ms: number
+  active_device_id: string
+}
+
+export type PlaybackDevice = {
+  id: string
+  name: string
+  kind: string
+  last_seen_at: string
+  is_active: boolean
+}
+
+export type PlayerDevicesResponse = {
+  active_device_id: string
+  devices: PlaybackDevice[]
 }
 
 export type SearchSong = {
