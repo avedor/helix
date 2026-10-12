@@ -50,6 +50,7 @@ from .routers.system import router as system_router
 from .routers.ytmusic import router as ytmusic_router
 from .routers.user_settings import router as user_settings_router
 from .routers.realtime import router as realtime_router
+from .routers.recommendations import router as recommendations_router
 from .routers.quality_upgrades import router as quality_upgrades_router
 
 logging.basicConfig(
@@ -210,6 +211,7 @@ app.include_router(subsonic_add_router)
 app.include_router(quality_upgrades_router)
 app.include_router(realtime_router)
 app.include_router(user_settings_router)
+app.include_router(recommendations_router)
 app.include_router(lyrics_router)
 
 
