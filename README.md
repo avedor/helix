@@ -337,6 +337,61 @@ If Subsonic is configured, Helix can:
 
 If Subsonic is not configured, Helix should disable library-dependent features instead of failing outright.
 
+## Navidrome plugin recommendations endpoint
+
+Helix exposes a small, stateless, token-authenticated endpoint that a Navidrome `MetadataAgent` plugin can call to build instant mixes. Navidrome sends a track/artist/album seed, Helix returns similar songs from its station providers, and Navidrome handles playback itself — nothing is proxied.
+
+### Configure Helix
+
+Generate a shared token and set it in Helix:
+
+```sh
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+```env
+HELIX_RECOMMENDATIONS_TOKEN=replace-with-the-generated-token
+```
+
+The endpoint requires `Authorization: Bearer <token>`. If the variable is empty the endpoint is disabled and returns `503`.
+
+Optional: `HELIX_RECOMMENDATIONS_TIMEOUT_S` (default `20`) caps how long a single recommendation request may take.
+
+### Configure the plugin
+
+In the Navidrome plugin settings, set:
+
+- `helix_url` — base URL of Helix (e.g. `http://helix:8000`; default `http://127.0.0.1:8000`)
+- `helix_token` — the same token as above
+- `default_limit` — number of similar songs to request (default `20`, max `100`)
+
+The plugin declares `requiredHosts: ["*"]` so it can reach Helix on loopback, a Docker network, or the LAN; Navidrome blocks plugin HTTP to those addresses otherwise.
+
+### Endpoint contract
+
+```text
+GET {helix_url}/api/recommendations/similar
+    ?type=track|album|artist
+    &title=<track or album title>
+    &artist=<artist>
+    &album=<album>
+    &limit=<1-100>
+Authorization: Bearer <token>
+```
+
+Response:
+
+```json
+{"songs": [{"title": "...", "artist": "...", "album": "..."}]}
+```
+
+- `type=track` uses the **song radio** provider (`seed_title` / `seed_artist`).
+- `type=artist` and `type=album` use the **similar artist** provider (`seed_artist`).
+
+Requests are stateless: results are not tied to a Helix account or session, so the plugin can call the endpoint for any seed.
+
+The companion Navidrome plugin — including prebuilt `.ndp` releases — is at [navidrome-helix-proxy](https://gitlab.com/avedorcloud/projects/navidrome-helix-proxy).
+
 ## slskd quality upgrades
 
 Helix can optionally use [slskd](https://github.com/slskd/slskd) as a background quality-upgrade source.
@@ -535,6 +590,8 @@ Before exposing Helix outside your LAN, put it behind HTTPS and review your depl
 Custom station providers can execute Python code inside the Helix container. Keep them disabled unless you need them.
 
 The slskd API key grants Helix access to the slskd API and should be treated as a secret. Unless you intentionally expose slskd, it is generally best to keep its web/API port accessible only on your trusted network.
+
+The recommendations token (`HELIX_RECOMMENDATIONS_TOKEN`) is a shared secret for the Navidrome plugin. Generate it with a CSPRNG, keep it out of version control, and rotate it on both sides together.
 
 Recommended public defaults:
 

@@ -72,3 +72,5 @@ services:
       HELIX_YTDLP_CHANNEL: "${HELIX_YTDLP_CHANNEL:-stable}"
       # Make this false if you are using helix over an http connection
       HELIX_COOKIE_SECURE: "${HELIX_COOKIE_SECURE:-true}"
+      # Shared token for the Navidrome plugin to call Helix recommendations endpoint
+      HELIX_RECOMMENDATIONS_TOKEN: ${HELIX_RECOMMENDATIONS_TOKEN}

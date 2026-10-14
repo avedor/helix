@@ -18,7 +18,7 @@ from ..services.accounts import (
     setup_enabled as setup_is_enabled,
 )
 from ..rate_limit import RATE_LIMITER
-from ..security import hash_password, verify_password
+from ..security import hash_password, secrets_compare, verify_password
 from .. import oidc
 from ..login_background import random_login_background
 
@@ -160,12 +160,6 @@ def oidc_callback(
     _set_session_cookie(response, session_token)
     _clear_oidc_flow_cookies(response)
     return response
-
-
-def secrets_compare(left: str, right: str) -> bool:
-    # Import locally so the auth router's import list stays focused on HTTP/auth types.
-    import secrets
-    return secrets.compare_digest(left, right)
 
 
 @router.post("/auth/login", response_model=MeResponse)

@@ -14,3 +14,7 @@ def verify_password(password: str, password_hash: str) -> bool:
 def new_session_token() -> str:
     # URL-safe random token
     return secrets.token_urlsafe(48)
+
+def secrets_compare(left: str, right: str) -> bool:
+    # Constant-time comparison to avoid leaking secret contents via timing.
+    return secrets.compare_digest(left, right)
