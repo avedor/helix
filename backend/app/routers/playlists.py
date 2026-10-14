@@ -34,6 +34,7 @@ from ..playlist_imports import (
     match_track,
     parse_exportify_csv,
     parse_helix_json,
+    parse_listenbrainz_playlist_url,
     parse_pandora_playlist_url,
     parse_ytmusic_playlist_url,
     parse_ytmusic_saved_html,
@@ -493,6 +494,8 @@ async def preview_playlist_import(payload: PlaylistImportPreviewRequest, playlis
                 imported_name, tracks = await asyncio.to_thread(parse_ytmusic_playlist_url, url)
         elif source == "pandora":
             imported_name, reported_count, tracks = await parse_pandora_playlist_url(url)
+        elif source == "listenbrainz":
+            imported_name, reported_count, tracks = await parse_listenbrainz_playlist_url(url)
         else:
             raise ValueError("Unknown playlist import source.")
     except ValueError as exc:

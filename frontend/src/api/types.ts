@@ -455,7 +455,7 @@ export type Capabilities = {
   }
 }
 
-export type PlaylistImportSource = 'helix' | 'ytmusic' | 'spotify' | 'pandora'
+export type PlaylistImportSource = 'helix' | 'ytmusic' | 'spotify' | 'pandora' | 'listenbrainz'
 
 export type PlaylistImportCandidate = {
   title: string

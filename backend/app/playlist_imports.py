@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from .art_sources import yt_thumbnail_url
+from .integrations.listenbrainz import lb_playlist
 
 
 @dataclass
@@ -523,6 +524,82 @@ async def parse_pandora_playlist_url(url: str) -> tuple[str, Optional[int], List
     if not tracks:
         raise ValueError("Pandora opened the shared playlist but returned no readable tracks.")
     return name, total, tracks
+
+
+_LISTENBRAINZ_PLAYLIST_MBID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_LISTENBRAINZ_RECORDING_MBID_RE = re.compile(r"/recording/([0-9a-fA-F-]{36})")
+
+
+def _listenbrainz_playlist_mbid(url: str) -> str:
+    match = _LISTENBRAINZ_PLAYLIST_MBID_RE.search(url or "")
+    return match.group(0).lower() if match else ""
+
+
+def _listenbrainz_recording_mbid(identifier: Any) -> str:
+    values = identifier if isinstance(identifier, list) else [identifier]
+    for value in values:
+        match = _LISTENBRAINZ_RECORDING_MBID_RE.search(str(value or ""))
+        if match:
+            return match.group(1).lower()
+    return ""
+
+
+def _listenbrainz_track_to_imported(track: Any) -> Optional[ImportedTrack]:
+    if not isinstance(track, dict):
+        return None
+    title = str(track.get("title") or "").strip()
+    if not title:
+        return None
+    try:
+        duration_ms = int(track.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration_ms = 0
+    return ImportedTrack(
+        source="listenbrainz",
+        source_track_id=_listenbrainz_recording_mbid(track.get("identifier")),
+        title=title,
+        artist=str(track.get("creator") or "").strip(),
+        album=str(track.get("album") or "").strip(),
+        duration_ms=duration_ms,
+        raw=track,
+    )
+
+
+async def parse_listenbrainz_playlist_url(url: str) -> tuple[str, Optional[int], List[ImportedTrack]]:
+    """Fetch a ListenBrainz playlist (by share URL/MBID) into importable tracks."""
+    mbid = _listenbrainz_playlist_mbid(url)
+    if not mbid:
+        raise ValueError("Paste a ListenBrainz playlist link, e.g. https://listenbrainz.org/playlist/…")
+
+    try:
+        payload = await lb_playlist(mbid)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"ListenBrainz could not load this playlist: {exc}") from exc
+
+    playlist = payload.get("playlist") if isinstance(payload, dict) else None
+    if not isinstance(playlist, dict):
+        raise ValueError("ListenBrainz returned an unexpected playlist response.")
+
+    name = str(playlist.get("title") or "").strip() or "ListenBrainz playlist"
+    tracks: List[ImportedTrack] = []
+    seen: set[str] = set()
+    for raw_track in playlist.get("track") or []:
+        track = _listenbrainz_track_to_imported(raw_track)
+        if track is None:
+            continue
+        dedupe = track.source_track_id or f"{_norm(track.title)}|{_norm(track.artist)}"
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        tracks.append(track)
+
+    if not tracks:
+        raise ValueError("This ListenBrainz playlist has no tracks.")
+    return name, len(tracks), tracks
 
 
 def track_identity_keys(track: ImportedTrack) -> set[str]:

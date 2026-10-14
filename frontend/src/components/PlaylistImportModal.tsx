@@ -8,6 +8,7 @@ const SOURCES: Array<{ id: PlaylistImportSource; label: string }> = [
   { id: 'ytmusic', label: 'YTMusic' },
   { id: 'spotify', label: 'Spotify' },
   { id: 'pandora', label: 'Pandora' },
+  { id: 'listenbrainz', label: 'ListenBrainz' },
 ]
 
 function sourceHelp(source: PlaylistImportSource) {
@@ -40,6 +41,14 @@ function sourceHelp(source: PlaylistImportSource) {
       return {
         title: 'Import from Pandora',
         text: 'Open the playlist or My Thumbs Up in Pandora, choose Share, copy the playlist link, and paste it here.',
+        acceptsFile: false,
+        acceptsUrl: true,
+        fileAccept: '',
+      }
+    case 'listenbrainz':
+      return {
+        title: 'Import from ListenBrainz',
+        text: 'Open the playlist on ListenBrainz, copy the link, and paste it here. Public playlists work without signing in.',
         acceptsFile: false,
         acceptsUrl: true,
         fileAccept: '',
@@ -274,7 +283,7 @@ export function PlaylistImportModal({ open, playlistId, playlistName: _playlistN
             {help.acceptsUrl ? (
               <label className="playlist-import-field">
                 <span>Playlist share URL</span>
-                <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder={source === 'pandora' ? 'https://www.pandora.com/playlist/…' : 'https://music.youtube.com/playlist?list=…'} />
+                <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder={source === 'pandora' ? 'https://www.pandora.com/playlist/…' : source === 'listenbrainz' ? 'https://listenbrainz.org/playlist/…' : 'https://music.youtube.com/playlist?list=…'} />
               </label>
             ) : null}
 

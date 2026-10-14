@@ -193,6 +193,18 @@ def _client() -> ListenBrainzClient:
     return _lb_client
 
 
+async def lb_playlist(playlist_mbid: str) -> Dict[str, Any]:
+    """Fetch a ListenBrainz playlist (JSPF, including track metadata) by MBID.
+
+    Public playlists need no auth; when LISTENBRAINZ_TOKEN is configured the
+    client also sends it, which allows private playlists to be imported too.
+    """
+    mbid = (playlist_mbid or "").strip()
+    if not mbid:
+        raise ValueError("A ListenBrainz playlist MBID is required.")
+    return await _client().get_json(f"/1/playlist/{mbid}", params={})
+
+
 # Cache raw LB radio responses; these are large but reduce upstream calls a lot.
 _lb_radio_cache: TTLCache[Dict[str, Any]] = TTLCache(max_items=512)
 
