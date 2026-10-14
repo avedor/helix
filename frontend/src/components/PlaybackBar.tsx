@@ -201,6 +201,11 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
     void run(action, shouldKeepPlaying ? 'play' : 'pause')
   }
 
+  const requestPlay = () => { void run(api.resume, 'play') }
+  const requestPause = () => { void run(api.pause, 'pause') }
+  const requestNext = () => runDirectionalSkip('next', api.next)
+  const requestPrevious = () => runDirectionalSkip('previous', api.previous)
+
   async function toggleLike() {
     if (!now || ratingBusy) return
     setRatingBusy(true)
@@ -290,6 +295,10 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
         repeatTrack={repeatTrack}
         onLocalPlayingChange={setLocalPlaying}
         onError={setError}
+        onPlayRequest={requestPlay}
+        onPauseRequest={requestPause}
+        onNextRequest={requestNext}
+        onPreviousRequest={requestPrevious}
       />
       <div
         className="ytmusic-seek-hitbox"

@@ -9,6 +9,10 @@ type Props = {
   repeatTrack?: boolean
   onLocalPlayingChange?: (playing: boolean) => void
   onError?: (message: string) => void
+  onPlayRequest?: () => void
+  onPauseRequest?: () => void
+  onNextRequest?: () => void
+  onPreviousRequest?: () => void
 }
 
 function streamUrl(queueItemId: string) {
@@ -42,13 +46,15 @@ function clearPosition(queueItemId: string) {
   window.localStorage.removeItem(positionKey(queueItemId))
 }
 
-export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, onLocalPlayingChange, onError }: Props) {
+export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, onLocalPlayingChange, onError, onPlayRequest, onPauseRequest, onNextRequest, onPreviousRequest }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const currentItemIdRef = useRef<string>('')
   const pendingRestoreRef = useRef(0)
   const lastIntentIdRef = useRef(0)
   const continueAfterEndedRef = useRef(false)
   const playAttemptRef = useRef(0)
+  const controlsRef = useRef({ onPlayRequest, onPauseRequest, onNextRequest, onPreviousRequest })
+  controlsRef.current = { onPlayRequest, onPauseRequest, onNextRequest, onPreviousRequest }
   const [audioError, setAudioError] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -148,6 +154,92 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     audio.volume = volume
     window.localStorage.setItem('helix.volume', String(volume))
   }, [volume])
+
+  // --- Media Session integration: OS media keys and the system "now playing"
+  // panel drive the same backend actions as the on-screen transport controls.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return
+
+    const handleSeek = (position: number) => {
+      const audio = audioRef.current
+      if (!audio || !nowId) return
+      const max = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : position
+      const clamped = Math.max(0, Math.min(position, max))
+      audio.currentTime = clamped
+      setCurrentTime(clamped)
+      savePosition(currentItemIdRef.current, clamped)
+    }
+
+    const handlers: Partial<Record<MediaSessionAction, MediaSessionActionHandler>> = {
+      play: () => controlsRef.current.onPlayRequest?.(),
+      pause: () => controlsRef.current.onPauseRequest?.(),
+      previoustrack: () => controlsRef.current.onPreviousRequest?.(),
+      nexttrack: () => controlsRef.current.onNextRequest?.(),
+      seekbackward: (details) => handleSeek((audioRef.current?.currentTime ?? 0) - (details.seekOffset ?? 10)),
+      seekforward: (details) => handleSeek((audioRef.current?.currentTime ?? 0) + (details.seekOffset ?? 10)),
+      seekto: (details) => {
+        if (typeof details.seekTime === 'number') handleSeek(details.seekTime)
+      },
+    }
+
+    const mediaSession = navigator.mediaSession
+    for (const [action, handler] of Object.entries(handlers)) {
+      try {
+        mediaSession.setActionHandler(action as MediaSessionAction, handler ?? null)
+      } catch {
+        // Some browsers reject unsupported actions; ignore them.
+      }
+    }
+
+    return () => {
+      for (const action of Object.keys(handlers)) {
+        try {
+          mediaSession.setActionHandler(action as MediaSessionAction, null)
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, [nowId])
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator) || typeof MediaMetadata === 'undefined') return
+    const mediaSession = navigator.mediaSession
+
+    if (!nowId) {
+      mediaSession.metadata = null
+      mediaSession.playbackState = 'none'
+      return
+    }
+
+    mediaSession.metadata = new MediaMetadata({
+      title: now?.title ?? '',
+      artist: now?.artist ?? '',
+      album: now?.album ?? '',
+      artwork: now?.art_url ? [{ src: now.art_url }] : [],
+    })
+  }, [nowId, now?.title, now?.artist, now?.album, now?.art_url])
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return
+    navigator.mediaSession.playbackState = !nowId ? 'none' : player?.is_playing ? 'playing' : 'paused'
+  }, [nowId, player?.is_playing])
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return
+    if (typeof navigator.mediaSession.setPositionState !== 'function') return
+    if (!nowId || !Number.isFinite(duration) || duration <= 0) return
+
+    try {
+      navigator.mediaSession.setPositionState({
+        duration,
+        playbackRate: 1,
+        position: Math.max(0, Math.min(currentTime, duration)),
+      })
+    } catch {
+      // Ignore transient invalid position state.
+    }
+  }, [nowId, duration, currentTime])
 
   async function handleEnded() {
     const endedItemId = currentItemIdRef.current
