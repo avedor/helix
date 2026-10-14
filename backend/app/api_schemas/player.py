@@ -34,6 +34,7 @@ class PlayerStateResponse(BaseModel):
     now_playing: Optional[PlayerQueueItem] = None
     queue: list[PlayerQueueItem] = []
     autoplay_enabled: bool = True
+    shuffle_enabled: bool = False
     active_station_id: str = ""
     active_station: Optional[StationResponse] = None
 
@@ -140,6 +141,8 @@ class PlayerPositionRequest(BaseModel):
 
 class PlayerActionRequest(BaseModel):
     position_ms: Optional[int] = None
+    # Set by the client when queue repeat is active and a track finishes.
+    repeat_queue: Optional[bool] = None
 
 
 class PlayerReplayRequest(BaseModel):
@@ -147,4 +150,8 @@ class PlayerReplayRequest(BaseModel):
     position_ms: Optional[int] = None
 
 class AutoplaySetRequest(BaseModel):
+    enabled: bool
+
+
+class ShuffleSetRequest(BaseModel):
     enabled: bool

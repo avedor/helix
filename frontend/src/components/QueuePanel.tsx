@@ -17,6 +17,18 @@ function formatDuration(ms?: number) {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
 }
 
+function IconShuffle() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M16 3h5v5" />
+      <path d="M4 20 21 3" />
+      <path d="M21 16v5h-5" />
+      <path d="m15 15 6 6" />
+      <path d="M4 4l5 5" />
+    </svg>
+  )
+}
+
 function moveQueueItem(queue: QueueItem[], fromId: string, toId: string) {
   const fromIndex = queue.findIndex((item) => item.id === fromId)
   const toIndex = queue.findIndex((item) => item.id === toId)
@@ -152,6 +164,7 @@ export function QueuePanel({ player, refresh, run }: Props) {
   const activeStation = player?.active_station ?? null
   const isStationPlaying = Boolean(player?.active_station_id || activeStation)
   const stationName = activeStation?.name || (isStationPlaying ? 'Station radio' : '')
+  const shuffleEnabled = Boolean(player?.shuffle_enabled)
 
   const cancelPendingDrag = () => {
     pointerCandidateRef.current = null
@@ -226,20 +239,35 @@ export function QueuePanel({ player, refresh, run }: Props) {
     >
       <div className="queue-header">
         <h2>Queue</h2>
-        <button
-          className="ghost queue-clear-placeholder"
-          type="button"
-          disabled={!queue.length && !isStationPlaying}
-          title={isStationPlaying ? 'Clear queue and stop station radio' : 'Clear queue'}
-          onClick={() => {
-            if (!queue.length && !isStationPlaying) return
-            cancelPendingDrag()
-            setReorderError('')
-            void run(() => api.clearQueue(), 'pause')
-          }}
-        >
-          Clear
-        </button>
+        <div className="queue-header-actions">
+          <button
+            className="ghost queue-shuffle-toggle"
+            type="button"
+            data-active={shuffleEnabled}
+            aria-pressed={shuffleEnabled}
+            title={shuffleEnabled ? 'Shuffle on' : 'Shuffle off'}
+            aria-label={shuffleEnabled ? 'Disable shuffle' : 'Enable shuffle'}
+            disabled={queue.length < 2}
+            onClick={() => void run(() => api.setShuffle(!shuffleEnabled), 'none')}
+          >
+            <IconShuffle />
+            <span>Shuffle</span>
+          </button>
+          <button
+            className="ghost queue-clear-placeholder"
+            type="button"
+            disabled={!queue.length && !isStationPlaying}
+            title={isStationPlaying ? 'Clear queue and stop station radio' : 'Clear queue'}
+            onClick={() => {
+              if (!queue.length && !isStationPlaying) return
+              cancelPendingDrag()
+              setReorderError('')
+              void run(() => api.clearQueue(), 'pause')
+            }}
+          >
+            Clear
+          </button>
+        </div>
       </div>
 
       {isStationPlaying ? (

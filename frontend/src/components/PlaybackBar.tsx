@@ -10,6 +10,11 @@ import { AudioPlayer } from './AudioPlayer'
 
 type PlaybarStyle = 'helix' | 'ytmusic' | 'spotify' | 'pandora'
 type SkipDirection = 'previous' | 'next'
+type RepeatMode = 'off' | 'queue' | 'track'
+
+const REPEAT_CYCLE: Record<RepeatMode, RepeatMode> = { off: 'queue', queue: 'track', track: 'off' }
+const REPEAT_LABEL: Record<RepeatMode, string> = { off: 'Repeat off', queue: 'Repeat queue', track: 'Repeat track' }
+const REPEAT_ARIA: Record<RepeatMode, string> = { off: 'Enable repeat queue', queue: 'Enable repeat track', track: 'Disable repeat' }
 
 type UserSettingsWithPlaybar = UserSettings & { playback_bar_style?: PlaybarStyle }
 
@@ -80,7 +85,11 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
   const [liked, setLiked] = useState(false)
   const [disliked, setDisliked] = useState(false)
   const [ratingBusy, setRatingBusy] = useState(false)
-  const [repeatTrack, setRepeatTrack] = useState(() => window.localStorage.getItem('helix.repeatTrack') === '1')
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>(() => {
+    const saved = window.localStorage.getItem('helix.repeatMode')
+    if (saved === 'off' || saved === 'queue' || saved === 'track') return saved
+    return window.localStorage.getItem('helix.repeatTrack') === '1' ? 'track' : 'off'
+  })
   const [playbarStyle, setPlaybarStyle] = useState<PlaybarStyle>('helix')
   const [skipDirection, setSkipDirection] = useState<SkipDirection | null>(null)
   const skipFeedbackTimerRef = useRef<number | null>(null)
@@ -88,6 +97,9 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
   const hasTrack = Boolean(now)
   const shouldKeepPlaying = Boolean(player?.is_playing || localPlaying)
   const trackIdentity = `${now?.subsonic_song_id ?? ''}|${now?.yt_video_id ?? ''}|${now?.id ?? ''}`
+  const repeatTrack = repeatMode === 'track'
+  const repeatQueue = repeatMode === 'queue'
+  const cycleRepeat = () => setRepeatMode((mode) => REPEAT_CYCLE[mode])
 
   useEffect(() => {
     let cancelled = false
@@ -142,8 +154,9 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
   }, [trackIdentity])
 
   useEffect(() => {
-    window.localStorage.setItem('helix.repeatTrack', repeatTrack ? '1' : '0')
-  }, [repeatTrack])
+    window.localStorage.setItem('helix.repeatMode', repeatMode)
+    window.localStorage.setItem('helix.repeatTrack', repeatMode === 'track' ? '1' : '0')
+  }, [repeatMode])
 
   useEffect(() => () => {
     if (skipFeedbackTimerRef.current !== null) window.clearTimeout(skipFeedbackTimerRef.current)
@@ -271,11 +284,12 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
           <button
             className="icon-button transport-extra transport-repeat"
             type="button"
-            title={repeatTrack ? 'Repeat track on' : 'Repeat track off'}
-            aria-label={repeatTrack ? 'Disable track repeat' : 'Enable track repeat'}
-            aria-pressed={repeatTrack}
-            data-active={repeatTrack}
-            onClick={() => setRepeatTrack((enabled) => !enabled)}
+            title={REPEAT_LABEL[repeatMode]}
+            aria-label={REPEAT_ARIA[repeatMode]}
+            aria-pressed={repeatMode !== 'off'}
+            data-active={repeatMode !== 'off'}
+            data-mode={repeatMode}
+            onClick={cycleRepeat}
             disabled={!hasTrack}
           >
             <IconRepeat />
@@ -288,6 +302,7 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
         audioIntent={audioIntent}
         onStateChange={setPlayer}
         repeatTrack={repeatTrack}
+        repeatQueue={repeatQueue}
         onLocalPlayingChange={setLocalPlaying}
         onError={setError}
       />
@@ -315,16 +330,17 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError }: P
         <button
           className="icon-button transport-extra ytmusic-repeat-button"
           type="button"
-          title={repeatTrack ? 'Repeat track on' : 'Repeat track off'}
-          aria-label={repeatTrack ? 'Disable track repeat' : 'Enable track repeat'}
-          aria-pressed={repeatTrack}
-          data-active={repeatTrack}
+          title={REPEAT_LABEL[repeatMode]}
+          aria-label={REPEAT_ARIA[repeatMode]}
+          aria-pressed={repeatMode !== 'off'}
+          data-active={repeatMode !== 'off'}
+          data-mode={repeatMode}
           onPointerDown={(event) => event.stopPropagation()}
           onPointerUp={(event) => event.stopPropagation()}
           onMouseDown={(event) => event.stopPropagation()}
           onClick={(event) => {
             event.stopPropagation()
-            setRepeatTrack((enabled) => !enabled)
+            cycleRepeat()
           }}
           disabled={!hasTrack}
         >

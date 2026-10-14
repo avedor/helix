@@ -7,6 +7,7 @@ type Props = {
   audioIntent: AudioIntent
   onStateChange: (player: PlayerState) => void
   repeatTrack?: boolean
+  repeatQueue?: boolean
   onLocalPlayingChange?: (playing: boolean) => void
   onError?: (message: string) => void
 }
@@ -42,7 +43,7 @@ function clearPosition(queueItemId: string) {
   window.localStorage.removeItem(positionKey(queueItemId))
 }
 
-export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, onLocalPlayingChange, onError }: Props) {
+export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, repeatQueue = false, onLocalPlayingChange, onError }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const currentItemIdRef = useRef<string>('')
   const pendingRestoreRef = useRef(0)
@@ -157,26 +158,35 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
 
     try {
       setAudioError('')
-      const next = await api.ended()
+      const next = await api.ended(repeatQueue)
       onStateChange(next)
 
+      const nextNowPlaying = next.now_playing
+      const replayingSameTrack = Boolean(nextNowPlaying) && nextNowPlaying?.id === endedItemId
       const shouldAdvanceAndPlay =
         shouldContinue &&
         Boolean(next.is_playing) &&
-        Boolean(next.now_playing) &&
-        next.now_playing?.id !== endedItemId
+        Boolean(nextNowPlaying) &&
+        (!replayingSameTrack || repeatQueue)
 
-      if (shouldAdvanceAndPlay && next.now_playing) {
+      if (shouldAdvanceAndPlay && nextNowPlaying) {
         window.setTimeout(() => {
           const audio = audioRef.current
-          if (!audio || !next.now_playing || !next.is_playing) return
-          currentItemIdRef.current = next.now_playing.id
+          if (!audio || !next.is_playing) return
+          const targetId = nextNowPlaying.id
+          currentItemIdRef.current = targetId
           pendingRestoreRef.current = 0
-          audio.src = streamUrl(next.now_playing.id)
-          audio.load()
+          if (targetId === endedItemId) {
+            // Queue repeat wrapped to the same single track: restart in place.
+            audio.currentTime = 0
+            setCurrentTime(0)
+          } else {
+            audio.src = streamUrl(targetId)
+            audio.load()
+          }
           const attemptId = ++playAttemptRef.current
           void audio.play().then(() => {
-            if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== next.now_playing?.id) return
+            if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== targetId) return
             continueAfterEndedRef.current = true
             onLocalPlayingChange?.(true)
           }).catch(() => {

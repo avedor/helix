@@ -69,6 +69,8 @@ class PlaybackSession(Base):
     is_playing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # Autoplay: when the queue ends, Helix can append a new item and keep playing.
     autoplay_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Shuffle mode: advancing picks a random queue item instead of the next one.
+    shuffle_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # If set, autoplay pulls from this station.
     active_station_id: Mapped[str] = mapped_column(String(36), nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

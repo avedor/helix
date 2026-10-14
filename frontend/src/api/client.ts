@@ -282,6 +282,7 @@ export const api = {
   }),
   jump: (index: number) => request<PlayerState>('/api/playback/jump', { method: 'POST', body: JSON.stringify({ index }) }),
   setAutoplay: (enabled: boolean) => request<PlayerState>('/api/playback/autoplay', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  setShuffle: (enabled: boolean) => request<PlayerState>('/api/playback/shuffle', { method: 'POST', body: JSON.stringify({ enabled }) }),
 
   isLiked: (item: QueueItem) => request<LikeState>(`/api/likes/is-liked?${identityQuery(item)}`),
   toggleLike: (item: QueueItem) => request<LikeState>('/api/likes/toggle', { method: 'POST', body: JSON.stringify(queueItemToRatingPayload(item)) }),

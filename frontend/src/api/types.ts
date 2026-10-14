@@ -28,6 +28,7 @@ export type PlayerState = {
   now_playing: QueueItem | null
   queue: QueueItem[]
   autoplay_enabled: boolean
+  shuffle_enabled: boolean
   active_station_id: string
   active_station?: Station | null
 }

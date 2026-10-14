@@ -256,6 +256,36 @@
   opacity: 0.55;
 }
 
+.queue-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.queue-shuffle-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.8rem;
+  opacity: 0.55;
+}
+
+.queue-shuffle-toggle svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.queue-shuffle-toggle[data-active="true"] {
+  opacity: 1;
+  color: var(--accent-bright);
+}
+
 .queue-list-redesign {
   display: flex;
   flex-direction: column;

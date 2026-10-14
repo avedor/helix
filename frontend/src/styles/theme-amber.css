@@ -1321,6 +1321,25 @@ button.primary svg,
   background: var(--accent);
 }
 
+/* Repeat mode indicator: a small "1" marks repeat-one, blank means repeat-queue. */
+.transport-repeat,
+.ytmusic-repeat-button {
+  position: relative;
+}
+
+.transport-repeat[data-mode="track"]::after,
+.ytmusic-repeat-button[data-mode="track"]::after {
+  content: "1";
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  font-size: 0.5rem;
+  font-weight: 800;
+  line-height: 1;
+  color: currentColor;
+  pointer-events: none;
+}
+
 
 /* ========================================================================
    QUEUE ACTION POLISH

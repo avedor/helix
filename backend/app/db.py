@@ -69,6 +69,10 @@ def init_db() -> None:
                 else:
                     raise RuntimeError("Could not generate unique five-letter lobby code during migration")
 
+        session_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(playback_sessions)")).fetchall()}
+        if session_cols and "shuffle_enabled" not in session_cols:
+            conn.execute(text("ALTER TABLE playback_sessions ADD COLUMN shuffle_enabled BOOLEAN NOT NULL DEFAULT 0"))
+
         lobby_queue_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(shared_lobby_queue_items)")).fetchall()}
         if lobby_queue_cols and "station_id" not in lobby_queue_cols:
             conn.execute(text("ALTER TABLE shared_lobby_queue_items ADD COLUMN station_id VARCHAR(36) NOT NULL DEFAULT ''"))

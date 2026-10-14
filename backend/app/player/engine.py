@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from ..auth import get_current_user
 from ..db import get_db, SessionLocal
 from ..models import User, PlaybackSession, QueueItem, ListenHistoryItem, Station, Playlist, PlaylistTrack, LikedTrack
-from ..api_schemas.player import PlayerPlayAlbumRequest, PlayerPlayPlaylistRequest, PlayerPlayTrackRequest, PlayerJumpRequest, PlayerQueueItem, PlayerStateResponse, PlayerQueueAppendTrackRequest, PlayerQueueAppendAlbumRequest, PlayerQueueReorderRequest, PlayerRemoveQueueItemResponse, PlayerHistoryItem, PlayerHistoryResponse, PlayerActionRequest, PlayerReplayRequest, AutoplaySetRequest
+from ..api_schemas.player import PlayerPlayAlbumRequest, PlayerPlayPlaylistRequest, PlayerPlayTrackRequest, PlayerJumpRequest, PlayerQueueItem, PlayerStateResponse, PlayerQueueAppendTrackRequest, PlayerQueueAppendAlbumRequest, PlayerQueueReorderRequest, PlayerRemoveQueueItemResponse, PlayerHistoryItem, PlayerHistoryResponse, PlayerActionRequest, PlayerReplayRequest, AutoplaySetRequest, ShuffleSetRequest
 from ..settings_store import get_settings
 from ..user_settings_store import station_queue_ahead_for_user, queue_add_position_for_user
 from ..integrations.subsonic import SubsonicClient
@@ -1150,6 +1150,7 @@ def state(db: Session = Depends(get_db), user: User = Depends(get_current_user))
         now_playing=now,
         queue=queue,
         autoplay_enabled=bool(getattr(sess, "autoplay_enabled", True)),
+        shuffle_enabled=bool(getattr(sess, "shuffle_enabled", False)),
         active_station_id=active_station_id,
         active_station=active_station,
     )
@@ -1167,6 +1168,26 @@ def set_autoplay(payload: AutoplaySetRequest, db: Session = Depends(get_db), use
     sess.autoplay_enabled = bool(payload.enabled)
     db.commit()
     return _changed_state(db=db, user=user)
+
+
+def set_shuffle(payload: ShuffleSetRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    sess = _get_or_create_session(db, user.id)
+    sess.shuffle_enabled = bool(payload.enabled)
+    db.commit()
+    return _changed_state(db=db, user=user)
+
+
+def _shuffled_next_index(total: int, current_index: int) -> int:
+    """Pick a random queue index other than the current one.
+
+    Returns the current index unchanged when the queue cannot be shuffled.
+    """
+    if total <= 1:
+        return 0 if total == 1 else current_index
+    candidates = [i for i in range(total) if i != current_index]
+    if not candidates:
+        return current_index
+    return random.SystemRandom().choice(candidates)
 
 
 def _clear_queue(db: Session, user_id: str, *, settings: Dict[str, Any], log_current: bool = False, played_ms: int = 0):
@@ -1922,10 +1943,27 @@ async def ended(payload: Optional[PlayerActionRequest] = None, db: Session = Dep
         played_ms = int(payload.position_ms or 0)
     _push_history(db, user.id, cur, event="completed", reason="ended", played_ms=played_ms, settings=settings)
 
+    shuffle_enabled = bool(getattr(sess, "shuffle_enabled", False))
+    repeat_queue = bool(getattr(payload, "repeat_queue", False)) if payload is not None else False
+
+    # Shuffle mode keeps the queue going by jumping to a random item.
+    if shuffle_enabled and len(items) > 1:
+        sess.current_index = _shuffled_next_index(len(items), sess.current_index)
+        sess.is_playing = _can_play(items[sess.current_index])
+        db.commit()
+        return _changed_state(db=db, user=user)
+
     # advance
     if sess.current_index + 1 < len(items):
         sess.current_index += 1
         sess.is_playing = True
+        db.commit()
+        return _changed_state(db=db, user=user)
+
+    # End of queue: wrap to the start when queue repeat is active.
+    if repeat_queue and items:
+        sess.current_index = 0
+        sess.is_playing = _can_play(items[0])
         db.commit()
         return _changed_state(db=db, user=user)
 
@@ -2041,6 +2079,14 @@ async def next_track(payload: Optional[PlayerActionRequest] = None, user: User =
 
         active_station_id = str(getattr(sess, "active_station_id", "") or "")
         autoplay_enabled = bool(getattr(sess, "autoplay_enabled", True))
+        shuffle_enabled = bool(getattr(sess, "shuffle_enabled", False))
+
+        # Shuffle mode: skip to a random queue item instead of the next one.
+        if shuffle_enabled and len(items) > 1:
+            sess.current_index = _shuffled_next_index(len(items), sess.current_index)
+            sess.is_playing = _can_play(items[sess.current_index])
+            db.commit()
+            return _changed_state(db=db, user=user)
 
         if sess.current_index < len(items) - 1:
             sess.current_index += 1
