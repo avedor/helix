@@ -1,6 +1,7 @@
 export type IconName =
   | 'home'
   | 'search'
+  | 'library'
   | 'stations'
   | 'playlists'
   | 'history'
@@ -36,6 +37,17 @@ export function NavIcon({ name }: { name: IconName }) {
         <svg {...common}>
           <circle cx="10.8" cy="10.8" r="6.2" />
           <path d="m15.4 15.4 4.3 4.3" />
+        </svg>
+      )
+
+    case 'library':
+      return (
+        <svg {...common}>
+          <path d="M4 4.5h16v15a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1Z" />
+          <circle cx="9" cy="12" r="3.4" />
+          <circle cx="15.4" cy="12" r="3.4" />
+          <circle cx="9" cy="12" r="1.1" />
+          <circle cx="15.4" cy="12" r="1.1" />
         </svg>
       )
 
