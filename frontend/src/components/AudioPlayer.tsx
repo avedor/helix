@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import type { AudioIntent, PlayerState } from '../api/types'
+import { usePlaybackHotkeys } from '../hooks/usePlaybackHotkeys'
 
 type Props = {
   player: PlayerState | null
@@ -9,6 +10,10 @@ type Props = {
   repeatTrack?: boolean
   onLocalPlayingChange?: (playing: boolean) => void
   onError?: (message: string) => void
+  onPlayRequest?: () => void
+  onPauseRequest?: () => void
+  onNextRequest?: () => void
+  onPreviousRequest?: () => void
 }
 
 function streamUrl(queueItemId: string) {
@@ -42,7 +47,7 @@ function clearPosition(queueItemId: string) {
   window.localStorage.removeItem(positionKey(queueItemId))
 }
 
-export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, onLocalPlayingChange, onError }: Props) {
+export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, onLocalPlayingChange, onError, onPlayRequest, onPauseRequest, onNextRequest, onPreviousRequest }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const currentItemIdRef = useRef<string>('')
   const pendingRestoreRef = useRef(0)
@@ -69,6 +74,23 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
 
   const now = player?.now_playing ?? null
   const nowId = now?.id ?? ''
+
+  usePlaybackHotkeys({
+    togglePlay: () => {
+      const audio = audioRef.current
+      if (!nowId || !audio) return
+      if (audio.paused) onPlayRequest?.()
+      else onPauseRequest?.()
+    },
+    next: () => onNextRequest?.(),
+    previous: () => onPreviousRequest?.(),
+    seekBy: (delta) => {
+      const audio = audioRef.current
+      if (!audio) return
+      seek(audio.currentTime + delta)
+    },
+    adjustVolume: (delta) => setVolume((value) => Math.max(0, Math.min(1, value + delta))),
+  })
 
   useEffect(() => {
     const audio = audioRef.current
