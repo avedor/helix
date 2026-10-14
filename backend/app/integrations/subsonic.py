@@ -4,7 +4,7 @@ import asyncio
 import time
 import hashlib
 import os
-import random
+import secrets
 import string
 from typing import Any, Dict, Optional, Tuple, List
 from collections import OrderedDict
@@ -18,7 +18,8 @@ logger = logging.getLogger("helix.integrations.subsonic")
 
 
 def _rand_salt(n: int = 12) -> str:
-    return "".join(random.choice(string.ascii_letters + string.digits) for _ in range(n))
+    # Use a CSPRNG for auth material, consistent with app.security.
+    return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(n))
 
 
 def _token(password: str, salt: str) -> str:
