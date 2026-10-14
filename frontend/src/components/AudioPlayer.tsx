@@ -42,6 +42,12 @@ function clearPosition(queueItemId: string) {
   window.localStorage.removeItem(positionKey(queueItemId))
 }
 
+// A stream can fail transiently while the backend is still fulfilling a
+// YouTube Music source. Retry a few times before giving up on the track.
+const STREAM_RETRY_DELAYS_MS = [600, 1500, 3000]
+// Bound automatic skipping so one broken queue cannot spin forever.
+const MAX_CONSECUTIVE_AUTO_SKIPS = 3
+
 export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = false, onLocalPlayingChange, onError }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const currentItemIdRef = useRef<string>('')
@@ -49,6 +55,9 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
   const lastIntentIdRef = useRef(0)
   const continueAfterEndedRef = useRef(false)
   const playAttemptRef = useRef(0)
+  const retryAttemptRef = useRef(0)
+  const retryTimerRef = useRef<number | null>(null)
+  const autoSkipRef = useRef(0)
   const [audioError, setAudioError] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -79,6 +88,11 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
       playAttemptRef.current += 1
       audio.pause()
       continueAfterEndedRef.current = false
+      if (retryTimerRef.current !== null) {
+        window.clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = null
+      }
+      retryAttemptRef.current = 0
       audio.removeAttribute('src')
       audio.load()
       setCurrentTime(0)
@@ -90,6 +104,12 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     if (currentItemIdRef.current !== nowId) {
       currentItemIdRef.current = nowId
       playAttemptRef.current += 1
+      if (retryTimerRef.current !== null) {
+        window.clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = null
+      }
+      retryAttemptRef.current = 0
+      setAudioError('')
       audio.pause()
       audio.src = streamUrl(nowId)
       pendingRestoreRef.current = audioIntent.id !== lastIntentIdRef.current ? 0 : readSavedPosition(nowId)
@@ -149,6 +169,10 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     window.localStorage.setItem('helix.volume', String(volume))
   }, [volume])
 
+  useEffect(() => () => {
+    if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current)
+  }, [])
+
   async function handleEnded() {
     const endedItemId = currentItemIdRef.current
     const shouldContinue = continueAfterEndedRef.current
@@ -204,13 +228,80 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     }
   }
 
+  function retryStream(failedId: string) {
+    const attempt = retryAttemptRef.current
+    if (attempt >= STREAM_RETRY_DELAYS_MS.length) return false
+
+    retryAttemptRef.current = attempt + 1
+    const delay = STREAM_RETRY_DELAYS_MS[attempt]
+    const shouldResume = Boolean(player?.is_playing) || continueAfterEndedRef.current
+
+    if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current)
+    retryTimerRef.current = window.setTimeout(() => {
+      retryTimerRef.current = null
+      const audio = audioRef.current
+      if (!audio || currentItemIdRef.current !== failedId) return
+      audio.src = streamUrl(failedId)
+      audio.load()
+      if (shouldResume) void audio.play().catch(() => undefined)
+    }, delay)
+    return true
+  }
+
+  async function autoSkipAfterFailure(failedId: string) {
+    if (autoSkipRef.current >= MAX_CONSECUTIVE_AUTO_SKIPS) return
+
+    const queue = player?.queue ?? []
+    const index = player?.current_index ?? -1
+    const hasNext = index >= 0 && index < queue.length - 1
+    if (!hasNext) return
+
+    autoSkipRef.current += 1
+    try {
+      const next = await api.next()
+      onStateChange(next)
+
+      const target = next.now_playing
+      if (!next.is_playing || !target || target.id === failedId) return
+
+      const audio = audioRef.current
+      if (!audio) return
+      currentItemIdRef.current = target.id
+      pendingRestoreRef.current = 0
+      retryAttemptRef.current = 0
+      audio.src = streamUrl(target.id)
+      audio.load()
+      const attemptId = ++playAttemptRef.current
+      void audio.play().then(() => {
+        if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== target.id) return
+        continueAfterEndedRef.current = true
+        onLocalPlayingChange?.(true)
+      }).catch(() => {
+        if (attemptId !== playAttemptRef.current) return
+        continueAfterEndedRef.current = false
+        onLocalPlayingChange?.(false)
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not skip failed track'
+      setAudioError(message)
+      onError?.(message)
+    }
+  }
+
   function handleError() {
     const audio = audioRef.current
     if (!audio || !currentItemIdRef.current || !audio.currentSrc) return
+
+    const failedId = currentItemIdRef.current
+    onLocalPlayingChange?.(false)
+
+    // Transient stream failures retry in place before we consider skipping.
+    if (retryStream(failedId)) return
+
     const message = audio.error ? `Audio playback error ${audio.error.code}` : 'Audio playback failed'
     setAudioError(message)
     onError?.(message)
-    onLocalPlayingChange?.(false)
+    void autoSkipAfterFailure(failedId)
   }
 
   function seek(seconds: number) {
@@ -234,6 +325,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
           onLocalPlayingChange?.(false)
         }}
         onPlay={() => {
+          retryAttemptRef.current = 0
           continueAfterEndedRef.current = true
           onLocalPlayingChange?.(true)
         }}
@@ -254,6 +346,8 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
           const seconds = event.currentTarget.currentTime || 0
           setCurrentTime(seconds)
           savePosition(currentItemIdRef.current, seconds)
+          // Stable playback clears the auto-skip budget for the next failure.
+          if (seconds > 3) autoSkipRef.current = 0
         }}
       />
 
