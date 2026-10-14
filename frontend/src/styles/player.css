@@ -238,6 +238,123 @@ nav a.active {
   background: currentColor;
 }
 
+/* Playback device picker (Spotify-Connect-style device list). */
+.device-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.device-button[data-active="true"] {
+  color: var(--accent);
+}
+
+.device-button[data-synced="true"]::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.device-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.55rem);
+  z-index: 60;
+  min-width: 15rem;
+  max-width: 21rem;
+  padding: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  border-radius: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+}
+
+.device-menu-header {
+  padding: 0.3rem 0.5rem;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+}
+
+.device-menu-empty {
+  padding: 0.4rem 0.5rem;
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+
+.device-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 0.55rem;
+}
+
+.device-menu-item[data-active="true"] {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.device-menu-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+
+.device-menu-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+}
+
+.device-menu-tag {
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.device-menu-tag-live {
+  color: var(--accent);
+  opacity: 0.95;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.device-menu-action {
+  margin-top: 0.2rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.device-menu-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.device-menu-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 @media (max-width: 1100px) {
   .now-playing {
     max-width: none;

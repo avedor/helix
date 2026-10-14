@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
-import type { AudioIntent, PlayerState, UserSettings, UserSettingsPayload } from '../api/types'
+import type { AudioIntent, PlaybackDevice, PlayerState, UserSettings, UserSettingsPayload } from '../api/types'
 import type { AudioRunMode } from '../hooks/usePlayer'
 import { Artwork } from './Artwork'
 import { ArtistLink } from './ArtistLink'
@@ -72,6 +72,12 @@ function IconLyrics() {
   )
 }
 
+function IconDevices() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="12" height="8.5" rx="1.3" /><path d="M6.5 20.5h6" /><path d="M9.5 16.5v4" /><rect x="16.8" y="10.5" width="4.2" height="7.5" rx="1.1" /></svg>
+  )
+}
+
 function isPlaybarStyle(value: unknown): value is PlaybarStyle {
   return value === 'helix' || value === 'ytmusic' || value === 'spotify' || value === 'pandora'
 }
@@ -108,6 +114,37 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError, onT
     }).catch(() => undefined)
     return () => { cancelled = true }
   }, [syncedDeviceId])
+
+  const myDeviceId = deviceId()
+  const [devices, setDevices] = useState<PlaybackDevice[]>([])
+  const [devicesOpen, setDevicesOpen] = useState(false)
+  const [devicesLoading, setDevicesLoading] = useState(false)
+
+  const refreshDevices = useCallback(() => {
+    setDevicesLoading(true)
+    return api.playerDevices()
+      .then((payload) => { setDevices(payload.devices) })
+      .catch(() => undefined)
+      .finally(() => { setDevicesLoading(false) })
+  }, [])
+
+  // Keep the picker fresh while it is open, and whenever the owner changes so
+  // "Playing" tracks the actual active device.
+  useEffect(() => {
+    if (!devicesOpen) return
+    void refreshDevices()
+  }, [devicesOpen, refreshDevices, player?.active_device_id])
+
+  useEffect(() => {
+    if (!devicesOpen) return
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null
+      if (target?.closest('.device-picker')) return
+      setDevicesOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [devicesOpen])
 
   useEffect(() => {
     let cancelled = false
@@ -268,6 +305,57 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError, onT
           <button className="icon-button lyrics-launch" type="button" aria-label="Open lyrics" title="Lyrics" onClick={() => navigate('/big-picture?view=lyrics')} disabled={!hasTrack}>
             <IconLyrics />
           </button>
+          <div className="device-picker">
+            <button
+              className="icon-button device-button"
+              type="button"
+              aria-label="Playback devices"
+              title="Playback devices"
+              aria-haspopup="menu"
+              aria-expanded={devicesOpen}
+              data-active={devicesOpen}
+              data-synced={otherDeviceActive}
+              onClick={() => setDevicesOpen((open) => !open)}
+            >
+              <IconDevices />
+            </button>
+            {devicesOpen ? (
+              <div className="device-menu" role="menu" aria-label="Playback devices">
+                <div className="device-menu-header">Playback devices</div>
+                {devicesLoading && devices.length === 0 ? (
+                  <div className="device-menu-empty">Loading…</div>
+                ) : devices.length === 0 ? (
+                  <div className="device-menu-empty">No other devices seen recently</div>
+                ) : (
+                  devices.map((device) => {
+                    const mine = device.id === myDeviceId
+                    return (
+                      <div key={device.id} className="device-menu-item" data-active={device.is_active} data-mine={mine}>
+                        <span className="device-menu-name">{device.name || device.kind || 'Device'}</span>
+                        <span className="device-menu-tags">
+                          {mine ? <span className="device-menu-tag">This device</span> : null}
+                          {device.is_active ? <span className="device-menu-tag device-menu-tag-live">Playing</span> : null}
+                        </span>
+                      </div>
+                    )
+                  })
+                )}
+                {otherDeviceActive ? (
+                  <button
+                    type="button"
+                    className="device-menu-action"
+                    disabled={!hasTrack || transportBusy}
+                    onClick={() => {
+                      void onTakeover().then(() => refreshDevices()).catch(() => undefined)
+                      setDevicesOpen(false)
+                    }}
+                  >
+                    {syncedDeviceName ? `Play here instead of ${syncedDeviceName}` : 'Play here on this device'}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
 

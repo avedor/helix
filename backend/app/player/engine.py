@@ -1125,6 +1125,60 @@ def _claim_device(db: Session, user: User, sess: PlaybackSession, device: Option
     return str(getattr(sess, "active_device_id", "") or "")
 
 
+# Devices prove they are alive by heart-beating: clients ping the player
+# WebSocket every ~20s, and the active renderer reports its position every ~4s
+# while playing. If the owning device falls silent for longer than this, playback
+# ownership is released so other devices are not stuck mirroring a dead one.
+ACTIVE_DEVICE_TTL_SECONDS = 60
+
+# Devices not seen for this long are treated as offline and hidden from the
+# device picker, so the list only shows renderers you could transfer to.
+DEVICE_PRESENCE_SECONDS = 300
+
+
+def _active_device_has_gone_stale(db: Session, user_id: str, sess: PlaybackSession) -> bool:
+    """Whether the session's active device no longer exists or has gone silent."""
+    active = str(getattr(sess, "active_device_id", "") or "")
+    if not active:
+        return False
+    dev = db.get(PlaybackDevice, active)
+    if dev is None or dev.user_id != user_id:
+        return True
+    last_seen = getattr(dev, "last_seen_at", None)
+    if last_seen is None:
+        return True
+    return (datetime.utcnow() - last_seen).total_seconds() > ACTIVE_DEVICE_TTL_SECONDS
+
+
+def release_stale_active_device(db: Session, user_id: str, sess: PlaybackSession) -> bool:
+    """Clear ``active_device_id`` when the owning device has stopped heart-beating.
+
+    Returns ``True`` when ownership was released. Callers are responsible for
+    committing the change and for broadcasting the updated state.
+    """
+    if not _active_device_has_gone_stale(db, user_id, sess):
+        return False
+    sess.active_device_id = ""
+    return True
+
+
+def release_active_device(db: Session, user_id: str, device_id: str) -> bool:
+    """Immediately release ownership when a specific device disconnects.
+
+    Only clears the session when ``device_id`` is the current owner, so a stale
+    disconnect from some other device cannot steal the active renderer.
+    """
+    device_id = (device_id or "").strip()
+    if not device_id:
+        return False
+    sess = _get_or_create_session(db, user_id)
+    if str(getattr(sess, "active_device_id", "") or "") != device_id:
+        return False
+    sess.active_device_id = ""
+    db.commit()
+    return True
+
+
 async def _subsonic_client_from_settings(settings: Dict[str, Any]) -> SubsonicClient:
     base_url = str(settings.get("subsonic_base_url") or "").strip()
     username = str(settings.get("subsonic_username") or "").strip()
@@ -1208,6 +1262,9 @@ def _rep_release(releases: List[Dict[str, Any]], preferred_country: str = "US") 
 
 def state(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     sess = _get_or_create_session(db, user.id)
+    # Release a dead/absent owner so nobody is stuck mirroring a silent device.
+    if release_stale_active_device(db, user.id, sess):
+        db.commit()
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     queue = [_to_item(i) for i in items]
     now = queue[sess.current_index] if 0 <= sess.current_index < len(queue) else None
@@ -2272,6 +2329,11 @@ def _honor_active_device(sess: PlaybackSession, device: Optional[Dict[str, str]]
     active = str(getattr(sess, "active_device_id", "") or "")
     if not active:
         return True
+    # If the owner has gone silent, let any live device take over cleanly instead
+    # of rejecting its reports until someone explicitly claims playback.
+    if release_stale_active_device(db, user.id, sess):
+        db.commit()
+        return True
     if not device:
         return False
     dev = touch_or_create_device(db, user.id, device["id"], device.get("name", ""), device.get("kind", ""))
@@ -2307,10 +2369,23 @@ def seek(payload: PlayerSeekRequest, db: Session = Depends(get_db), user: User =
 
 
 def player_devices(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """List the user's registered playback devices (last seen first)."""
+    """List the user's registered playback devices (last seen first).
+
+    Only devices seen within ``DEVICE_PRESENCE_SECONDS`` are returned so the
+    picker lists renderers that are plausibly still online, and a stale owner is
+    released so ``active_device_id`` never points at a device missing from the
+    list.
+    """
     sess = _get_or_create_session(db, user.id)
+    if release_stale_active_device(db, user.id, sess):
+        db.commit()
     active = str(getattr(sess, "active_device_id", "") or "")
-    rows = db.execute(select(PlaybackDevice).where(PlaybackDevice.user_id == user.id).order_by(PlaybackDevice.last_seen_at.desc())).scalars().all()
+    cutoff = datetime.utcnow() - timedelta(seconds=DEVICE_PRESENCE_SECONDS)
+    rows = db.execute(
+        select(PlaybackDevice)
+        .where(PlaybackDevice.user_id == user.id, PlaybackDevice.last_seen_at >= cutoff)
+        .order_by(PlaybackDevice.last_seen_at.desc())
+    ).scalars().all()
     devices = [
         PlaybackDeviceResponse(
             id=d.id,

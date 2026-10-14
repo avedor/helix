@@ -30,6 +30,18 @@ def _websocket_user(ws: WebSocket) -> User | None:
     finally:
         db.close()
 
+def _release_player_device(user_id: str, device_id: str) -> None:
+    """Release playback ownership when the owning device's last socket closes."""
+    from ..player import engine as player_engine
+    from ..realtime import schedule_player_state_broadcast
+    db = SessionLocal()
+    try:
+        if player_engine.release_active_device(db, user_id, device_id):
+            schedule_player_state_broadcast(user_id)
+    finally:
+        db.close()
+
+
 @router.websocket("/ws/player")
 async def player_socket(ws: WebSocket):
     user = _websocket_user(ws)
@@ -37,30 +49,36 @@ async def player_socket(ws: WebSocket):
         await ws.close(code=4401)
         return
     device_id = (ws.query_params.get("device_id") or "").strip()
-    if device_id:
+    device_name = (ws.query_params.get("device_name") or "").strip()
+    device_kind = (ws.query_params.get("device_kind") or "").strip()
+
+    def touch_device() -> None:
+        if not device_id:
+            return
         from ..devices import touch_or_create_device
         db = SessionLocal()
         try:
-            touch_or_create_device(
-                db,
-                user.id,
-                device_id,
-                name=(ws.query_params.get("device_name") or "").strip(),
-                kind=(ws.query_params.get("device_kind") or "").strip(),
-            )
+            touch_or_create_device(db, user.id, device_id, name=device_name, kind=device_kind)
             db.commit()
         finally:
             db.close()
+
+    touch_device()
     await ws.accept()
-    await HUB.register_player(user.id, ws)
+    await HUB.register_player(user.id, ws, device_id)
     await broadcast_player_state(user.id)
     try:
         while True:
             await ws.receive_text()
+            # Client heartbeats keep last_seen_at fresh so an idle-but-open
+            # device is never mistaken for a dead one.
+            touch_device()
     except WebSocketDisconnect:
         pass
     finally:
-        HUB.unregister_player(user.id, ws)
+        gone_device = HUB.unregister_player(user.id, ws)
+        if gone_device:
+            _release_player_device(user.id, gone_device)
 
 @router.websocket("/ws/quality-upgrades")
 async def quality_upgrades_socket(ws: WebSocket):

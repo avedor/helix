@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import DefaultDict
+from typing import DefaultDict, Dict, Optional
 
 from fastapi import WebSocket
 
@@ -18,6 +18,9 @@ class LobbySocket:
 class RealtimeHub:
     def __init__(self) -> None:
         self.player: DefaultDict[str, set[WebSocket]] = defaultdict(set)
+        # Maps a connected player socket to the device id it represents, so a
+        # disconnect can release playback ownership held by that device.
+        self.player_device: Dict[WebSocket, str] = {}
         self.lobbies: DefaultDict[str, set[LobbySocket]] = defaultdict(set)
         self.quality_upgrades: set[WebSocket] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -30,15 +33,29 @@ class RealtimeHub:
         self._seq += 1
         return self._seq
 
-    async def register_player(self, user_id: str, ws: WebSocket) -> None:
+    async def register_player(self, user_id: str, ws: WebSocket, device_id: str = "") -> None:
         self.player[user_id].add(ws)
+        device_id = (device_id or "").strip()
+        if device_id:
+            self.player_device[ws] = device_id
 
-    def unregister_player(self, user_id: str, ws: WebSocket) -> None:
+    def unregister_player(self, user_id: str, ws: WebSocket) -> Optional[str]:
+        """Remove a player socket.
+
+        Returns the device id when this was the last socket for that device (so
+        the caller can release playback ownership), otherwise ``None``.
+        """
+        device_id = self.player_device.pop(ws, None)
         bucket = self.player.get(user_id)
         if bucket:
             bucket.discard(ws)
             if not bucket:
                 self.player.pop(user_id, None)
+        if device_id:
+            remaining = self.player.get(user_id) or ()
+            if not any(self.player_device.get(other) == device_id for other in remaining):
+                return device_id
+        return None
 
     async def register_lobby(self, lobby_id: str, member_id: str, ws: WebSocket) -> LobbySocket:
         conn = LobbySocket(ws, member_id)
