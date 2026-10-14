@@ -390,6 +390,8 @@ Response:
 
 Requests are stateless: results are not tied to a Helix account or session, so the plugin can call the endpoint for any seed.
 
+The companion Navidrome plugin — including prebuilt `.ndp` releases — is at [navidrome-helix-proxy](https://gitlab.com/avedorcloud/projects/navidrome-helix-proxy).
+
 ## slskd quality upgrades
 
 Helix can optionally use [slskd](https://github.com/slskd/slskd) as a background quality-upgrade source.
