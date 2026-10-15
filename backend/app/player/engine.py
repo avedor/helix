@@ -1131,6 +1131,31 @@ def _claim_device(db: Session, user: User, sess: PlaybackSession, device: Option
     return str(getattr(sess, "active_device_id", "") or "")
 
 
+def _cast_redirect(sess: PlaybackSession, device: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Attribute a transport command to the cast renderer that owns playback.
+
+    While a renderer owns the clock (``active_device_id`` is a cast device), a
+    phone acting as a remote must not steal ownership by claiming itself --
+    otherwise the speaker is left playing unattended. Returning the cast's own
+    device dict keeps it the owner; the cast sync loop then reconciles the
+    renderer to the newly-requested session state.
+    """
+    incoming = (device or {}).get("id") or ""
+    active = str(getattr(sess, "active_device_id", "") or "")
+    if not active or incoming == active:
+        return device
+    try:
+        from ..cast.manager import CAST_MANAGER
+
+        active_cast = CAST_MANAGER.active_by_device(active)
+    except Exception:
+        return device
+    if active_cast is None:
+        return device
+    CAST_MANAGER.mark_dirty(active_cast.user_id)
+    return {"id": active, "name": active_cast.device.label, "kind": "cast"}
+
+
 # Devices prove they are alive by heart-beating: clients ping the player
 # WebSocket every ~20s, and the active renderer reports its position every ~4s
 # while playing. If the owning device falls silent for longer than this, playback
@@ -2096,14 +2121,24 @@ def history_set_limit(payload: Dict[str, Any], db: Session = Depends(get_db), us
     return history(limit=100, offset=0, db=db, user=user)
 
 
-async def ended(payload: Optional[PlayerActionRequest] = None, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
+async def advance_after_end(
+    db: Session,
+    user: User,
+    *,
+    played_ms: Optional[int] = None,
+    device: Optional[Dict[str, str]] = None,
+):
+    """Move to the next item after the current one finished.
+
+    Shared by the client-driven ``/ended`` handler and the cast sync loop: a
+    Chromecast cannot report completion back to Helix, so when it owns playback
+    the server watches the renderer and calls this to advance the queue.
+    """
     settings = get_settings(db)
     sess = _get_or_create_session(db, user.id)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
-    played_ms = 0
-    if payload and payload.position_ms is not None:
-        played_ms = int(payload.position_ms or 0)
+    played_ms = int(played_ms or 0)
     # Fall back to the server clock when no client-reported position arrived.
     if played_ms <= 0 and cur is not None:
         if str(getattr(sess, "position_item_id", "") or "") == str(cur.id):
@@ -2138,9 +2173,17 @@ async def ended(payload: Optional[PlayerActionRequest] = None, db: Session = Dep
     return _changed_state(db=db, user=user, device=device)
 
 
+async def ended(payload: Optional[PlayerActionRequest] = None, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
+    played_ms = None
+    if payload and payload.position_ms is not None:
+        played_ms = int(payload.position_ms or 0)
+    return await advance_after_end(db, user, played_ms=played_ms, device=device)
+
+
 def jump_to(payload: PlayerJumpRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     settings = get_settings(db)
     sess = _get_or_create_session(db, user.id)
+    device = _cast_redirect(sess, device)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
     _push_history(db, user.id, cur, event="skipped", reason="jump", played_ms=_played_ms_or_clock(sess, cur, None), settings=settings)
@@ -2220,6 +2263,7 @@ async def next_track(payload: Optional[PlayerActionRequest] = None, user: User =
     try:
         settings = get_settings(db)
         sess = _get_or_create_session(db, user.id)
+        device = _cast_redirect(sess, device)
         items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
         cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
         played_ms = _played_ms_or_clock(sess, cur, payload.position_ms if payload else None)
@@ -2268,6 +2312,7 @@ async def next_track(payload: Optional[PlayerActionRequest] = None, user: User =
 def prev_track(payload: Optional[PlayerActionRequest] = None, db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     settings = get_settings(db)
     sess = _get_or_create_session(db, user.id)
+    device = _cast_redirect(sess, device)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     cur = items[sess.current_index] if 0 <= sess.current_index < len(items) else None
     played_ms = _played_ms_or_clock(sess, cur, payload.position_ms if payload else None)
@@ -2287,6 +2332,7 @@ def prev_track(payload: Optional[PlayerActionRequest] = None, db: Session = Depe
 
 def pause(db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     sess = _get_or_create_session(db, user.id)
+    device = _cast_redirect(sess, device)
     _freeze_position(sess)
     sess.is_playing = False
     db.commit()
@@ -2295,6 +2341,7 @@ def pause(db: Session = Depends(get_db), user: User = Depends(get_current_user),
 
 def resume(db: Session = Depends(get_db), user: User = Depends(get_current_user), device: Optional[Dict[str, str]] = Depends(_device_dependency)):
     sess = _get_or_create_session(db, user.id)
+    device = _cast_redirect(sess, device)
     items = db.execute(select(QueueItem).where(QueueItem.session_user_id == user.id).order_by(QueueItem.position.asc())).scalars().all()
     if not items:
         raise HTTPException(status_code=400, detail="Queue is empty.")
@@ -2367,6 +2414,7 @@ def seek(payload: PlayerSeekRequest, db: Session = Depends(get_db), user: User =
     sess, _items, cur = _current_queue_item(db, user)
     if cur is None:
         raise HTTPException(status_code=400, detail="Nothing is playing.")
+    device = _cast_redirect(sess, device)
     _claim_device(db, user, sess, device)
     _anchor_position(sess, cur.id, position_ms=int(payload.position_ms or 0))
     db.commit()

@@ -30,6 +30,7 @@ from .routers.admin import router as admin_router
 from .routers.album import router as album_router
 from .routers.art import router as art_router
 from .routers.auth import router as auth_router
+from .routers.cast import router as cast_router
 from .routers.dislikes import router as dislikes_router
 from .routers.likes import router as likes_router
 from .routers.lobbies import router as lobbies_router
@@ -167,6 +168,12 @@ def _startup():
     except Exception:
         logging.getLogger(__name__).exception("Failed to start quality upgrade worker")
 
+    try:
+        from .cast.service import cast_sync_loop
+        asyncio.get_event_loop().create_task(cast_sync_loop())
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to start cast sync loop")
+
     from .download_manager import DOWNLOAD_MANAGER
     from .settings_store import get_settings
 
@@ -213,6 +220,7 @@ app.include_router(realtime_router)
 app.include_router(user_settings_router)
 app.include_router(lyrics_router)
 app.include_router(devices_router)
+app.include_router(cast_router)
 
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
