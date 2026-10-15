@@ -18,7 +18,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, delete, func, or_, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from ..auth import get_current_user
+from ..auth import SESSION_COOKIE, get_current_user
+from ..stream_tokens import (
+    get_stream_secret,
+    sign_stream_params,
+    signed_stream_path,
+    verify_stream_params,
+)
 from ..db import get_db, SessionLocal
 from ..models import User, PlaybackSession, QueueItem, ListenHistoryItem, Station, Playlist, PlaylistTrack, LikedTrack
 from ..api_schemas.player import PlayerPlayAlbumRequest, PlayerPlayPlaylistRequest, PlayerPlayTrackRequest, PlayerJumpRequest, PlayerQueueItem, PlayerStateResponse, PlayerQueueAppendTrackRequest, PlayerQueueAppendAlbumRequest, PlayerQueueReorderRequest, PlayerRemoveQueueItemResponse, PlayerHistoryItem, PlayerHistoryResponse, PlayerActionRequest, PlayerReplayRequest, AutoplaySetRequest
@@ -2139,10 +2145,70 @@ def _stream_queue_item_snapshot(cur: QueueItem) -> SimpleNamespace:
     )
 
 
+def _public_base_url(request: Request) -> str:
+    configured = (os.getenv("HELIX_PUBLIC_BASE_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _stream_user(
+    request: Request,
+    queue_item_id: str,
+    uid: Optional[str] = None,
+    exp: Optional[str] = None,
+    sig: Optional[str] = None,
+) -> User:
+    """Authenticate a stream request by session cookie *or* a signed URL.
+
+    First-party Helix clients keep using the ``mr_session`` cookie. Cookieless
+    renderers instead present the short-lived HMAC parameters minted by
+    ``GET /api/stream/{queue_item_id}/url``: ``uid`` (owner), ``exp`` (expiry),
+    and ``sig``. The signature binds the item, the user, and the expiry, so a
+    leaked URL only unlocks that single item until it lapses.
+    """
+    if request.cookies.get(SESSION_COOKIE):
+        return get_current_user(request)
+
+    if uid and exp and sig:
+        # Short-lived session: verification may also generate the signing secret.
+        db = SessionLocal()
+        try:
+            secret = get_stream_secret(db)
+            if verify_stream_params(secret, queue_item_id, uid, exp, sig):
+                user = db.get(User, uid)
+                if user is not None and user.is_active:
+                    db.expunge(user)
+                    return user
+        finally:
+            db.close()
+
+    raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+def signed_stream_url(
+    queue_item_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Mint a short-lived, cookieless URL for one of the caller's queue items."""
+    cur = db.execute(
+        select(QueueItem).where(QueueItem.session_user_id == user.id, QueueItem.id == queue_item_id)
+    ).scalar_one_or_none()
+    if cur is None:
+        raise HTTPException(status_code=404, detail="Unknown queue item.")
+
+    secret = get_stream_secret(db)
+    expires_at, signature = sign_stream_params(secret, queue_item_id, user.id)
+    path = signed_stream_path(queue_item_id, user.id, expires_at, signature)
+    return {"url": f"{_public_base_url(request)}{path}", "expires_at_ms": expires_at * 1000}
+
+
 async def stream_item(
     queue_item_id: str,
     request: Request,
-    user: User = Depends(get_current_user),
+    user: User = Depends(_stream_user),
 ):
     """Stream audio for a queue item.
 
