@@ -297,6 +297,9 @@ export const api = {
   reportPosition: (queueItemId: string, positionMs: number) => request<PlayerState>('/api/playback/position', { method: 'POST', body: JSON.stringify({ queue_item_id: queueItemId, position_ms: Math.max(0, Math.round(positionMs)) }) }),
   transferPlayback: (deviceId: string) => request<PlayerState>('/api/playback/transfer', { method: 'POST', body: JSON.stringify({ device_id: deviceId }) }),
   playerDevices: () => request<PlayerDevicesResponse>('/api/player/devices'),
+  // Mint a short-lived, cookieless URL for one queue item. Renderers and viewer
+  // devices use this so audio can be fetched without the session cookie.
+  streamUrl: (queueItemId: string) => request<{ url: string; expires_at_ms: number }>(`/api/stream/${encodeURIComponent(queueItemId)}/url`, { cache: 'no-store' }),
 
   isLiked: (item: QueueItem) => request<LikeState>(`/api/likes/is-liked?${identityQuery(item)}`),
   toggleLike: (item: QueueItem) => request<LikeState>('/api/likes/toggle', { method: 'POST', body: JSON.stringify(queueItemToRatingPayload(item)) }),

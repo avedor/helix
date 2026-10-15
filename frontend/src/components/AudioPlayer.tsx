@@ -13,8 +13,41 @@ type Props = {
   syncedDeviceName?: string
 }
 
-function streamUrl(queueItemId: string) {
+// Cookie-authenticated stream path. Used as a fallback if minting a signed URL
+// fails (for example while the backend is still rolling out the endpoint).
+function cookieStreamUrl(queueItemId: string) {
   return `/api/stream/${encodeURIComponent(queueItemId)}`
+}
+
+// Signed URLs let the element fetch audio without the session cookie, so a
+// renderer or viewer device can be handed the same source. URLs are cached per
+// item until shortly before they lapse.
+const streamUrlCache = new Map<string, { url: string; expiresAtMs: number }>()
+const streamUrlInflight = new Map<string, Promise<string>>()
+
+function cachedStreamUrl(queueItemId: string): string | null {
+  const entry = streamUrlCache.get(queueItemId)
+  if (entry && entry.expiresAtMs - Date.now() > 30_000) return entry.url
+  return null
+}
+
+function resolveStreamUrl(queueItemId: string): Promise<string> {
+  const cached = streamUrlCache.get(queueItemId)
+  if (cached && cached.expiresAtMs - Date.now() > 30_000) return Promise.resolve(cached.url)
+  const inflight = streamUrlInflight.get(queueItemId)
+  if (inflight) return inflight
+  let promise!: Promise<string>
+  promise = api.streamUrl(queueItemId)
+    .then((res) => {
+      streamUrlCache.set(queueItemId, { url: res.url, expiresAtMs: res.expires_at_ms })
+      return res.url
+    })
+    .catch(() => cookieStreamUrl(queueItemId))
+    .finally(() => {
+      if (streamUrlInflight.get(queueItemId) === promise) streamUrlInflight.delete(queueItemId)
+    })
+  streamUrlInflight.set(queueItemId, promise)
+  return promise
 }
 
 function formatTime(seconds: number) {
@@ -64,6 +97,9 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
   const continueAfterEndedRef = useRef(false)
   const playAttemptRef = useRef(0)
   const lastReportAtRef = useRef(0)
+  const loadTokenRef = useRef(0)
+  const appliedItemRef = useRef('')
+  const sourceReadyRef = useRef<Promise<void>>(Promise.resolve())
   const [audioError, setAudioError] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -78,6 +114,26 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
   function markLocalPlaying(playing: boolean) {
     setLocallyPlaying(playing)
     onLocalPlayingChange?.(playing)
+  }
+
+  // Resolve and apply the audio source for `itemId`, preferring a signed URL so
+  // playback does not depend on the session cookie. `resolveStreamUrl` falls
+  // back to the cookie path if minting fails. A token guards the async hop so a
+  // slow mint never lands after the track has moved on; `force` reloads an
+  // already-applied item (used when taking over from another device).
+  function applySource(itemId: string, opts: { reload?: boolean } = {}): Promise<void> {
+    const audio = audioRef.current
+    if (!audio) return Promise.resolve()
+    if (!opts.reload && appliedItemRef.current === itemId) return Promise.resolve()
+    const token = ++loadTokenRef.current
+    const promise = resolveStreamUrl(itemId).then((url) => {
+      if (token !== loadTokenRef.current || currentItemIdRef.current !== itemId) return
+      audio.src = url
+      appliedItemRef.current = itemId
+      audio.load()
+    })
+    sourceReadyRef.current = promise
+    return promise
   }
 
   useEffect(() => {
@@ -103,6 +159,8 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
 
     if (!nowId) {
       currentItemIdRef.current = ''
+      loadTokenRef.current += 1
+      appliedItemRef.current = ''
       playAttemptRef.current += 1
       audio.pause()
       continueAfterEndedRef.current = false
@@ -118,14 +176,13 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
       currentItemIdRef.current = nowId
       playAttemptRef.current += 1
       audio.pause()
-      audio.src = streamUrl(nowId)
       const serverPosition = effectiveServerPositionMs(player, nowId)
       const saved = audioIntent.id !== lastIntentIdRef.current ? 0 : readSavedPosition(nowId)
       pendingRestoreRef.current = serverPosition > 0 ? serverPosition : saved
-      audio.load()
       setCurrentTime(pendingRestoreRef.current)
       setDuration(0)
       markLocalPlaying(false)
+      void applySource(nowId)
     }
   }, [audioIntent.id, nowId, onLocalPlayingChange])
 
@@ -146,14 +203,19 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
     if (audioIntent.action === 'play' && nowId) {
       if (currentItemIdRef.current !== nowId) {
         currentItemIdRef.current = nowId
-        audio.src = streamUrl(nowId)
+        audio.pause()
         pendingRestoreRef.current = effectiveServerPositionMs(player, nowId)
-        audio.load()
+        setCurrentTime(pendingRestoreRef.current)
+        setDuration(0)
+        void applySource(nowId)
       }
 
       const attemptId = ++playAttemptRef.current
       setAudioError('')
-      audio.play().then(() => {
+      sourceReadyRef.current.then(() => {
+        if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nowId) return
+        return audio.play()
+      }).then(() => {
         if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nowId) return
         markLocalPlaying(true)
       }).catch((err) => {
@@ -163,6 +225,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
           markLocalPlaying(false)
           return
         }
+        streamUrlCache.delete(nowId)
         const message = err instanceof Error ? err.message : 'Browser blocked audio playback'
         setAudioError(message)
         onError?.(message)
@@ -177,14 +240,16 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
       currentItemIdRef.current = nowId
       playAttemptRef.current += 1
       audio.pause()
-      audio.src = streamUrl(nowId)
       pendingRestoreRef.current = effectiveServerPositionMs(player, nowId)
-      audio.load()
       setCurrentTime(pendingRestoreRef.current)
       setDuration(0)
+      void applySource(nowId, { reload: true })
       const attemptId = ++playAttemptRef.current
       setAudioError('')
-      audio.play().then(() => {
+      sourceReadyRef.current.then(() => {
+        if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nowId) return
+        return audio.play()
+      }).then(() => {
         if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nowId) return
         markLocalPlaying(true)
       }).catch((err) => {
@@ -194,6 +259,7 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
           markLocalPlaying(false)
           return
         }
+        streamUrlCache.delete(nowId)
         const message = err instanceof Error ? err.message : 'Browser blocked audio playback'
         setAudioError(message)
         onError?.(message)
@@ -253,16 +319,19 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
         next.now_playing?.id !== endedItemId
 
       if (shouldAdvanceAndPlay && next.now_playing) {
+        const nextId = next.now_playing.id
         window.setTimeout(() => {
           const audio = audioRef.current
-          if (!audio || !next.now_playing || !next.is_playing) return
-          currentItemIdRef.current = next.now_playing.id
+          if (!audio || !next.is_playing) return
+          currentItemIdRef.current = nextId
           pendingRestoreRef.current = 0
-          audio.src = streamUrl(next.now_playing.id)
-          audio.load()
+          void applySource(nextId, { reload: true })
           const attemptId = ++playAttemptRef.current
-          void audio.play().then(() => {
-            if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== next.now_playing?.id) return
+          void sourceReadyRef.current.then(() => {
+            if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nextId) return
+            return audio.play()
+          }).then(() => {
+            if (attemptId !== playAttemptRef.current || currentItemIdRef.current !== nextId) return
             continueAfterEndedRef.current = true
             markLocalPlaying(true)
           }).catch(() => {
@@ -292,7 +361,11 @@ export function AudioPlayer({ player, audioIntent, onStateChange, repeatTrack = 
 
   function handleError() {
     const audio = audioRef.current
-    if (!audio || !currentItemIdRef.current || !audio.currentSrc) return
+    if (!audio) return
+    // A failed element may be holding an expired/again-invalid signed URL.
+    // Drop it so the next load mints a fresh one (or falls back to the cookie).
+    streamUrlCache.delete(currentItemIdRef.current)
+    if (!currentItemIdRef.current || !audio.currentSrc) return
     const message = audio.error ? `Audio playback error ${audio.error.code}` : 'Audio playback failed'
     setAudioError(message)
     onError?.(message)
