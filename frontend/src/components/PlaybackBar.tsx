@@ -245,6 +245,20 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError, onT
     bar.style.setProperty('--helix-scrub-progress', `${ratio * 100}%`)
   }
 
+  // Hand playback to another of this user's devices. The server moves ownership
+  // and broadcasts; this device yields automatically when it sees the active
+  // device change, and the target picks up the server position.
+  async function movePlaybackTo(targetId: string, targetName: string) {
+    if (!hasTrack || transportBusy) return
+    try {
+      const next = await api.transferPlayback(targetId)
+      setPlayer(next)
+      setDevicesOpen(false)
+    } catch (err) {
+      setError?.(err instanceof Error ? err.message : `Could not move playback to ${targetName}`)
+    }
+  }
+
   function runDirectionalSkip(direction: SkipDirection, action: () => Promise<PlayerState>) {
     setSkipDirection(null)
     window.requestAnimationFrame(() => {
@@ -329,9 +343,27 @@ export function PlaybackBar({ player, audioIntent, run, setPlayer, setError, onT
                 ) : (
                   devices.map((device) => {
                     const mine = device.id === myDeviceId
+                    const label = device.name || device.kind || 'Device'
+                    if (!mine && !device.is_active) {
+                      return (
+                        <button
+                          key={device.id}
+                          type="button"
+                          className="device-menu-item device-menu-item-action"
+                          disabled={!hasTrack || transportBusy}
+                          title={`Move playback to ${label}`}
+                          onClick={() => void movePlaybackTo(device.id, label)}
+                        >
+                          <span className="device-menu-name">{label}</span>
+                          <span className="device-menu-tags">
+                            <span className="device-menu-tag device-menu-tag-action">Move here</span>
+                          </span>
+                        </button>
+                      )
+                    }
                     return (
                       <div key={device.id} className="device-menu-item" data-active={device.is_active} data-mine={mine}>
-                        <span className="device-menu-name">{device.name || device.kind || 'Device'}</span>
+                        <span className="device-menu-name">{label}</span>
                         <span className="device-menu-tags">
                           {mine ? <span className="device-menu-tag">This device</span> : null}
                           {device.is_active ? <span className="device-menu-tag device-menu-tag-live">Playing</span> : null}

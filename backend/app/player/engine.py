@@ -22,7 +22,7 @@ from ..auth import get_current_user
 from ..db import get_db, SessionLocal
 from ..devices import touch_or_create_device
 from ..models import User, PlaybackSession, QueueItem, ListenHistoryItem, Station, Playlist, PlaylistTrack, LikedTrack, PlaybackDevice
-from ..api_schemas.player import PlayerPlayAlbumRequest, PlayerPlayPlaylistRequest, PlayerPlayTrackRequest, PlayerJumpRequest, PlayerQueueItem, PlayerStateResponse, PlayerQueueAppendTrackRequest, PlayerQueueAppendAlbumRequest, PlayerQueueReorderRequest, PlayerRemoveQueueItemResponse, PlayerHistoryItem, PlayerHistoryResponse, PlayerActionRequest, PlayerReplayRequest, AutoplaySetRequest, PlayerPositionRequest, PlayerSeekRequest, PlayerDevicesResponse, PlaybackDeviceResponse
+from ..api_schemas.player import PlayerPlayAlbumRequest, PlayerPlayPlaylistRequest, PlayerPlayTrackRequest, PlayerJumpRequest, PlayerQueueItem, PlayerStateResponse, PlayerQueueAppendTrackRequest, PlayerQueueAppendAlbumRequest, PlayerQueueReorderRequest, PlayerRemoveQueueItemResponse, PlayerHistoryItem, PlayerHistoryResponse, PlayerActionRequest, PlayerReplayRequest, AutoplaySetRequest, PlayerPositionRequest, PlayerSeekRequest, PlayerTransferRequest, PlayerDevicesResponse, PlaybackDeviceResponse
 from ..settings_store import get_settings
 from ..user_settings_store import station_queue_ahead_for_user, queue_add_position_for_user
 from ..integrations.subsonic import SubsonicClient
@@ -2397,6 +2397,57 @@ def player_devices(db: Session = Depends(get_db), user: User = Depends(get_curre
         for d in rows
     ]
     return PlayerDevicesResponse(active_device_id=active, devices=devices)
+
+
+def transfer_playback(
+    payload: PlayerTransferRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    device: Optional[Dict[str, str]] = Depends(_device_dependency),
+):
+    """Hand playback ownership to another of the caller's devices.
+
+    Transport endpoints always claim the *calling* device; this lets the device
+    you are holding nominate a different renderer (e.g. move the music from the
+    phone to the kitchen speaker). The chosen device picks up the
+    server-authoritative position the next time it observes the session, and the
+    previous owner yields through the normal state broadcast.
+
+    The caller is deliberately *not* claimed: the whole point is to leave
+    ownership on the target. We only accept a device that belongs to the caller
+    and has heartbeat recently, so a transfer can never point at an offline or
+    foreign renderer.
+    """
+    target_id = (payload.device_id or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="device_id is required.")
+
+    target = db.get(PlaybackDevice, target_id)
+    if target is None or target.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Unknown playback device.")
+
+    last_seen = getattr(target, "last_seen_at", None)
+    if last_seen is None or (datetime.utcnow() - last_seen).total_seconds() > DEVICE_PRESENCE_SECONDS:
+        raise HTTPException(status_code=409, detail="That device is offline.")
+
+    sess, _items, cur = _current_queue_item(db, user)
+    if cur is None:
+        raise HTTPException(status_code=400, detail="Nothing is playing.")
+
+    # Refresh presence so the target is not considered stale the instant it is
+    # handed control (it may take a moment to receive and act on the broadcast).
+    target.last_seen_at = datetime.utcnow()
+    sess.active_device_id = target.id
+    if payload.play is not None:
+        sess.is_playing = bool(payload.play)
+    _anchor_position(sess, cur.id)
+    db.commit()
+
+    snapshot = state(db=db, user=user)
+    from ..realtime import schedule_player_state_broadcast
+
+    schedule_player_state_broadcast(user.id)
+    return snapshot
 
 
 def _stream_queue_item_snapshot(cur: QueueItem) -> SimpleNamespace:

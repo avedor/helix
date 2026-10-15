@@ -145,6 +145,19 @@ class PlayerPositionRequest(BaseModel):
     position_ms: int = 0
 
 
+class PlayerTransferRequest(BaseModel):
+    """Hand playback ownership to another of the caller's devices.
+
+    Unlike the transport endpoints, which always claim the *calling* device,
+    this nominates ``device_id`` as the active renderer. ``play`` optionally
+    starts or pauses the session as part of the hand-off; when omitted the
+    current play/pause state is preserved.
+    """
+
+    device_id: str
+    play: Optional[bool] = None
+
+
 class PlayerSeekRequest(BaseModel):
     position_ms: int = 0
 

@@ -295,6 +295,7 @@ export const api = {
   setAutoplay: (enabled: boolean) => request<PlayerState>('/api/playback/autoplay', { method: 'POST', body: JSON.stringify({ enabled }) }),
   seek: (positionMs: number) => request<PlayerState>('/api/playback/seek', { method: 'POST', body: JSON.stringify({ position_ms: Math.max(0, Math.round(positionMs)) }) }),
   reportPosition: (queueItemId: string, positionMs: number) => request<PlayerState>('/api/playback/position', { method: 'POST', body: JSON.stringify({ queue_item_id: queueItemId, position_ms: Math.max(0, Math.round(positionMs)) }) }),
+  transferPlayback: (deviceId: string) => request<PlayerState>('/api/playback/transfer', { method: 'POST', body: JSON.stringify({ device_id: deviceId }) }),
   playerDevices: () => request<PlayerDevicesResponse>('/api/player/devices'),
 
   isLiked: (item: QueueItem) => request<LikeState>(`/api/likes/is-liked?${identityQuery(item)}`),

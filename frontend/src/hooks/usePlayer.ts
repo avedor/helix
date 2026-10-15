@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
+import { deviceId } from '../device'
 import type { AudioIntent, PlayerState } from '../api/types'
 
 export type AudioRunMode = 'play' | 'pause' | 'none'
@@ -16,6 +17,11 @@ export function usePlayer() {
   const socketOpenRef = useRef(false)
   const lastSocketSeqRef = useRef(0)
   const lastProgressSeqRef = useRef(0)
+  // Track where playback lives so a hand-off from another device can be told
+  // apart from this client's own claim. `suppressAutoTakeoverRef` swallows the
+  // state change produced by a local action so it does not double-fire.
+  const activeDeviceRef = useRef<string | null>(null)
+  const suppressAutoTakeoverRef = useRef(false)
 
   const refresh = useCallback(async () => {
     if (actionInFlightRef.current) return
@@ -66,6 +72,9 @@ export function usePlayer() {
         // Starting playback remains backend-first. Non-direct actions such as
         // next/previous retain their existing post-action audio behavior.
         if (audioMode === 'play') {
+          // A local play claims this device; suppress the matching hand-off so
+          // we do not queue a second reload on top of the 'play' intent.
+          suppressAutoTakeoverRef.current = true
           setAudioIntent((current) => ({ id: current.id + 1, action: 'play' }))
         } else if (audioMode === 'pause' && action !== api.pause) {
           setAudioIntent((current) => ({ id: current.id + 1, action: 'pause' }))
@@ -188,12 +197,31 @@ export function usePlayer() {
     }
   }, [refresh])
 
+  // React to a hand-off initiated elsewhere: when another device transfers
+  // playback to us we become the active renderer while the session keeps
+  // playing, so reload the audio element at the server position and start.
+  // The first observation (a page load) just records where playback lives, and
+  // transitions claimed by our own transport actions are suppressed above.
+  useEffect(() => {
+    const active = player?.active_device_id ?? ''
+    const previous = activeDeviceRef.current
+    activeDeviceRef.current = active
+    const suppress = suppressAutoTakeoverRef.current
+    suppressAutoTakeoverRef.current = false
+    if (previous === null || previous === active) return
+    // Require a live owner handing off to *this* device: a transition from
+    // "nobody owns playback" is an ordinary local claim, not a remote transfer.
+    if (suppress || !previous || active !== deviceId() || !player?.is_playing) return
+    setAudioIntent((current) => ({ id: current.id + 1, action: 'takeover' }))
+  }, [player?.active_device_id, player?.is_playing])
+
   // Claim playback on this device: the backend's transport endpoints already
   // make the calling device the active renderer, so resuming is enough; then
   // force the local audio element to reload from the server-authoritative
   // position rather than its stale currentTime.
   const takeoverHere = useCallback(() => {
     const promise = run(api.resume)
+    suppressAutoTakeoverRef.current = true
     void promise.then(() => {
       setAudioIntent((current) => ({ id: current.id + 1, action: 'takeover' }))
     }).catch(() => undefined)

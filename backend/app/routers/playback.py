@@ -12,6 +12,7 @@ from ..api_schemas.player import (
     PlayerPositionRequest,
     PlayerReplayRequest,
     PlayerSeekRequest,
+    PlayerTransferRequest,
     PlayerStateResponse,
     PlayerDevicesResponse,
 )
@@ -34,3 +35,4 @@ router.add_api_route("/pause", player_engine.pause, methods=["POST"], response_m
 router.add_api_route("/resume", player_engine.resume, methods=["POST"], response_model=PlayerStateResponse)
 router.add_api_route("/position", player_engine.report_position, methods=["POST"], response_model=PlayerStateResponse)
 router.add_api_route("/seek", player_engine.seek, methods=["POST"], response_model=PlayerStateResponse)
+router.add_api_route("/transfer", player_engine.transfer_playback, methods=["POST"], response_model=PlayerStateResponse)
